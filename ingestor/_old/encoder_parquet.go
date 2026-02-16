@@ -12,6 +12,8 @@ type ParquetEncoder[iType any] struct {
 	Compression string
 }
 
+func (e ParquetEncoder[iType]) FileExtension() string { return ".parquet" }
+
 func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, string, error) {
 	output := &bytes.Buffer{}
 

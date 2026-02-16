@@ -11,6 +11,8 @@ type NDJSONEncoder[iType any] struct {
 	TrailingNewline bool
 }
 
+func (e NDJSONEncoder[iType]) FileExtension() string { return ".ndjson" }
+
 func (e NDJSONEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, string, error) {
 	_ = ctx
 

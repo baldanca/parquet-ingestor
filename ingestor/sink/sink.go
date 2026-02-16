@@ -1,4 +1,4 @@
-package ingestor
+package sink
 
 import "context"
 
@@ -6,9 +6,8 @@ type WriteRequest struct {
 	Key         string
 	Data        []byte
 	ContentType string
-	Meta        map[string]string
 }
 
-type Sink interface {
+type Sinkr interface {
 	Write(ctx context.Context, req WriteRequest) error
 }
