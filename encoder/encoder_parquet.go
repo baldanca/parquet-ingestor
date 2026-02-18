@@ -4,60 +4,99 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"strings"
+	"sync"
 
 	"github.com/parquet-go/parquet-go"
 )
 
+const parquetContentType = "application/vnd.apache.parquet"
+
+var parquetBufferPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
 type ParquetEncoder[iType any] struct {
-	// Compression (optional): "", "snappy", "gzip", "zstd"
 	Compression string
 }
 
 func (e ParquetEncoder[iType]) FileExtension() string { return ".parquet" }
 
-func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, string, error) {
+func (e ParquetEncoder[iType]) ContentType() string {
+	return parquetContentType
+}
+
+func (e ParquetEncoder[iType]) EncodeTo(ctx context.Context, items []iType, w io.Writer) error {
+	if w == nil {
+		return fmt.Errorf("nil writer")
+	}
+
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
-			return nil, "", ctx.Err()
+			return ctx.Err()
 		default:
 		}
 	}
 
-	output := &bytes.Buffer{}
-	options := make([]parquet.WriterOption, 0, 1)
+	comp := strings.ToLower(strings.TrimSpace(e.Compression))
 
-	switch e.Compression {
+	var wopts []parquet.WriterOption
+	switch comp {
 	case "":
-		// no compression
 	case "snappy":
-		options = append(options, parquet.Compression(&parquet.Snappy))
+		wopts = []parquet.WriterOption{parquet.Compression(&parquet.Snappy)}
 	case "gzip":
-		options = append(options, parquet.Compression(&parquet.Gzip))
+		wopts = []parquet.WriterOption{parquet.Compression(&parquet.Gzip)}
 	case "zstd":
-		options = append(options, parquet.Compression(&parquet.Zstd))
+		wopts = []parquet.WriterOption{parquet.Compression(&parquet.Zstd)}
 	default:
-		return nil, "", fmt.Errorf("unsupported parquet compression: %q", e.Compression)
+		return fmt.Errorf("unsupported parquet compression: %q", e.Compression)
 	}
 
-	w := parquet.NewGenericWriter[iType](output, options...)
+	pw := parquet.NewGenericWriter[iType](w, wopts...)
 
-	if _, err := w.Write(items); err != nil {
-		_ = w.Close()
-		return nil, "", err
+	if _, err := pw.Write(items); err != nil {
+		_ = pw.Close()
+		return err
 	}
 
-	if err := w.Close(); err != nil {
-		return nil, "", err
+	if err := pw.Close(); err != nil {
+		return err
 	}
 
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
-			return nil, "", ctx.Err()
+			return ctx.Err()
 		default:
 		}
 	}
 
-	return output.Bytes(), "application/vnd.apache.parquet", nil
+	return nil
+}
+
+func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, string, error) {
+	buf := parquetBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+
+	if n := len(items); n > 0 {
+		grow := n * 128
+		if grow > 4<<20 {
+			grow = 4 << 20
+		}
+		buf.Grow(grow)
+	}
+
+	err := e.EncodeTo(ctx, items, buf)
+	if err != nil {
+		parquetBufferPool.Put(buf)
+		return nil, "", err
+	}
+
+	out := append([]byte(nil), buf.Bytes()...)
+	parquetBufferPool.Put(buf)
+
+	return out, parquetContentType, nil
 }
