@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -132,6 +133,67 @@ func BenchmarkSink_Write_NoCapture(b *testing.B) {
 					b.Fatalf("write: %v", err)
 				}
 			}
+		})
+	}
+}
+
+// Measures the Sink cost under contention without benchmark noise from generating unique keys.
+func BenchmarkSink_Write_NoCapture_Parallel_StaticKey(b *testing.B) {
+	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			f := &fakeS3NoCapture{}
+			s := New(f, "bkt", "pfx")
+			data := make([]byte, size)
+			ctx := context.Background()
+
+			// constant key: isolates Sink.Write overhead
+			req := WriteRequest{Key: "x.parquet", Data: data, ContentType: "application/octet-stream"}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					if err := s.Write(ctx, req); err != nil {
+						b.Fatalf("write: %v", err)
+					}
+				}
+			})
+		})
+	}
+}
+
+// Measures parallel writes with varying keys but WITHOUT per-iteration formatting.
+// Keys are precomputed up-front and then indexed with an atomic counter.
+func BenchmarkSink_Write_NoCapture_Parallel_PrecomputedKeys(b *testing.B) {
+	// power of two for cheap modulo with bitmask
+	const keyCount = 1 << 16
+	keys := make([]string, 0, keyCount)
+	for i := 0; i < keyCount; i++ {
+		// keep it reasonably sized and unique enough
+		keys = append(keys, fmt.Sprintf("x/%d.parquet", i))
+	}
+	mask := uint64(keyCount - 1)
+
+	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			f := &fakeS3NoCapture{}
+			s := New(f, "bkt", "pfx")
+			data := make([]byte, size)
+			ctx := context.Background()
+
+			var seq uint64
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					idx := atomic.AddUint64(&seq, 1) & mask
+					req := WriteRequest{Key: keys[idx], Data: data, ContentType: "application/octet-stream"}
+					if err := s.Write(ctx, req); err != nil {
+						b.Fatalf("write: %v", err)
+					}
+				}
+			})
 		})
 	}
 }

@@ -245,3 +245,31 @@ func BenchmarkAckGroup_Commit(b *testing.B) {
 		})
 	}
 }
+
+// Parallel benchmark: each goroutine uses its own AckGroup (AckGroup is not meant to be shared).
+func BenchmarkAckGroup_Commit_Parallel(b *testing.B) {
+	for _, n := range []int{100, 1000, 5000} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			src := &benchSrcNoCopy{}
+			ctx := context.Background()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			b.RunParallel(func(pb *testing.PB) {
+				// local group per worker
+				var g AckGroup
+				g.msgs = make([]Message, 0, n)
+				for i := 0; i < n; i++ {
+					g.Add(fakeMsg{id: "x", handle: "h-x"})
+				}
+
+				for pb.Next() {
+					if err := g.Commit(ctx, src); err != nil {
+						b.Fatalf("commit: %v", err)
+					}
+				}
+			})
+		})
+	}
+}

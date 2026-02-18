@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -19,6 +20,8 @@ type Sink struct {
 	bucket    string
 	bucketPtr *string
 	prefix    string
+
+	pool sync.Pool
 }
 
 func New(client s3API, bucket, prefix string) *Sink {
@@ -34,8 +37,11 @@ func New(client s3API, bucket, prefix string) *Sink {
 		bucket: bucket,
 		prefix: strings.Trim(prefix, "/"),
 	}
-	// Pointer estável (sem aws.String que aloca).
+	// Ponteiro estável.
 	s.bucketPtr = &s.bucket
+
+	// Scratch objects para evitar allocs por Write devido a “address-of-local escape”.
+	s.pool.New = func() any { return new(putScratch) }
 	return s
 }
 
@@ -44,38 +50,59 @@ func (s *Sink) Write(ctx context.Context, req WriteRequest) error {
 		return fmt.Errorf("empty key")
 	}
 
-	// Mantém semântica do S3 (não faz path-clean).
-	key := strings.TrimLeft(req.Key, "/")
+	// Use pooled scratch to avoid per-call heap allocations from escaping locals.
+	sc := s.pool.Get().(*putScratch)
+	defer s.pool.Put(sc)
+
+	// Build key sem path-clean.
+	key := trimLeftSlashes(req.Key)
 	if s.prefix != "" {
-		key = s.prefix + "/" + key
+		sc.b.Reset()
+		sc.b.Grow(len(s.prefix) + 1 + len(key))
+		sc.b.WriteString(s.prefix)
+		sc.b.WriteByte('/')
+		sc.b.WriteString(key)
+		sc.key = sc.b.String()
+	} else {
+		sc.key = key
 	}
 
-	// Evita aws.String/aws.Int64 (alocam).
-	keyVar := key
-	cl := int64(len(req.Data))
+	sc.cl = int64(len(req.Data))
 
-	var ct string
 	if req.ContentType != "" {
-		ct = req.ContentType
+		sc.ct = req.ContentType
+		sc.in.ContentType = &sc.ct
+	} else {
+		sc.ct = ""
+		sc.in.ContentType = nil
 	}
 
-	// Evita alocação do bytes.NewReader.
-	var body bytes.Reader
-	body.Reset(req.Data)
+	sc.body.Reset(req.Data)
 
-	input := s3.PutObjectInput{
-		Bucket:        s.bucketPtr,
-		Key:           &keyVar,
-		Body:          &body,
-		ContentLength: &cl,
-	}
-	if ct != "" {
-		input.ContentType = &ct
-	}
+	sc.in.Bucket = s.bucketPtr
+	sc.in.Key = &sc.key
+	sc.in.Body = &sc.body
+	sc.in.ContentLength = &sc.cl
 
-	_, err := s.client.PutObject(ctx, &input)
+	_, err := s.client.PutObject(ctx, &sc.in)
 	if err != nil {
 		return fmt.Errorf("put s3 object key=%q: %w", key, err)
 	}
 	return nil
+}
+
+type putScratch struct {
+	in   s3.PutObjectInput
+	key  string
+	ct   string
+	cl   int64
+	body bytes.Reader
+	b    strings.Builder
+}
+
+func trimLeftSlashes(s string) string {
+	for len(s) > 0 && s[0] == '/' {
+		s = s[1:]
+	}
+	return s
 }
