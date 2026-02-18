@@ -1,15 +1,6 @@
 package ingestor
 
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"time"
-)
-
+/*
 type KeyFunc[iType any] func(ctx context.Context, batch Batch[iType]) (key string, err error)
 
 type Ingestor[iType any] struct {
@@ -307,3 +298,4 @@ func randomHex(nBytes int) (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+*/

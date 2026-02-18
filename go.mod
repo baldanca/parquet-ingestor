@@ -6,9 +6,11 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.21
+	github.com/parquet-go/parquet-go v0.27.0
 )
 
 require (
+	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.4 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.17 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.17 // indirect
@@ -18,4 +20,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.17 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.17 // indirect
 	github.com/aws/smithy-go v1.24.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/parquet-go/bitpack v1.0.0 // indirect
+	github.com/parquet-go/jsonlite v1.0.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.21 // indirect
+	github.com/twpayne/go-geom v1.6.1 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	google.golang.org/protobuf v1.34.2 // indirect
 )
