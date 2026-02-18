@@ -37,7 +37,10 @@ func (f *fakeS3API) PutObject(ctx context.Context, in *s3.PutObjectInput, _ ...f
 	}
 
 	if in.Body != nil {
-		b, _ := io.ReadAll(in.Body)
+		b, err := io.ReadAll(in.Body)
+		if err != nil {
+			return nil, err
+		}
 		f.mu.Lock()
 		f.lastBody = b
 		f.mu.Unlock()
@@ -57,9 +60,19 @@ func (f *fakeS3NoCapture) PutObject(ctx context.Context, in *s3.PutObjectInput, 
 	f.putCalls++
 	err := f.putErr
 	f.mu.Unlock()
+
 	if err != nil {
 		return nil, err
 	}
+
+	// IMPORTANT: drain body to avoid io.Pipe deadlock in streaming benchmarks.
+	if in.Body != nil {
+		_, derr := io.Copy(io.Discard, in.Body)
+		if derr != nil {
+			return nil, derr
+		}
+	}
+
 	return &s3.PutObjectOutput{}, nil
 }
 
@@ -114,6 +127,88 @@ func TestSink_Write_PropagatesPutError(t *testing.T) {
 	s := New(f, "bkt", "p")
 	if err := s.Write(context.Background(), WriteRequest{Key: "x", Data: []byte("1")}); !errors.Is(err, boom) {
 		t.Fatalf("expected boom, got %v", err)
+	}
+}
+
+func TestSink_WriteStream_BuildsKeyWithPrefixWithoutCleaning(t *testing.T) {
+	f := &fakeS3API{}
+	s := New(f, "bkt", "/pfx/")
+
+	data := []byte("stream-abc")
+	err := s.WriteStream(context.Background(), StreamWriteRequest{
+		Key:         "/a/../b/x.parquet",
+		ContentType: "application/octet-stream",
+		Write: func(w io.Writer) error {
+			_, err := w.Write(data)
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteStream: %v", err)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.putCalls != 1 {
+		t.Fatalf("expected 1 call, got %d", f.putCalls)
+	}
+	if aws.ToString(f.lastIn.Bucket) != "bkt" {
+		t.Fatalf("bucket: %q", aws.ToString(f.lastIn.Bucket))
+	}
+	if aws.ToString(f.lastIn.Key) != "pfx/a/../b/x.parquet" {
+		t.Fatalf("key: %q", aws.ToString(f.lastIn.Key))
+	}
+	if aws.ToString(f.lastIn.ContentType) != "application/octet-stream" {
+		t.Fatalf("content-type: %q", aws.ToString(f.lastIn.ContentType))
+	}
+	if f.lastIn.ContentLength != nil {
+		t.Fatalf("content-length should be nil for streaming, got %#v", f.lastIn.ContentLength)
+	}
+	if !bytes.Equal(f.lastBody, data) {
+		t.Fatalf("body mismatch: %q", string(f.lastBody))
+	}
+}
+
+func TestSink_WriteStream_EmptyKeyReturnsError(t *testing.T) {
+	f := &fakeS3API{}
+	s := New(f, "bkt", "")
+	if err := s.WriteStream(context.Background(), StreamWriteRequest{Key: "", Write: func(w io.Writer) error { return nil }}); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestSink_WriteStream_PropagatesPutError(t *testing.T) {
+	boom := errors.New("boom")
+	f := &fakeS3API{putErr: boom}
+	s := New(f, "bkt", "p")
+	err := s.WriteStream(context.Background(), StreamWriteRequest{
+		Key: "x",
+		Write: func(w io.Writer) error {
+			_, _ = w.Write([]byte("1"))
+			return nil
+		},
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected boom, got %v", err)
+	}
+}
+
+func TestSink_WriteStream_PropagatesWriterError(t *testing.T) {
+	boom := errors.New("writer boom")
+	f := &fakeS3API{}
+	s := New(f, "bkt", "p")
+	err := s.WriteStream(context.Background(), StreamWriteRequest{
+		Key: "x",
+		Write: func(w io.Writer) error {
+			return boom
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected writer boom, got %v", err)
 	}
 }
 
@@ -191,6 +286,65 @@ func BenchmarkSink_Write_NoCapture_Parallel_PrecomputedKeys(b *testing.B) {
 					req := WriteRequest{Key: keys[idx], Data: data, ContentType: "application/octet-stream"}
 					if err := s.Write(ctx, req); err != nil {
 						b.Fatalf("write: %v", err)
+					}
+				}
+			})
+		})
+	}
+}
+
+func BenchmarkSink_WriteStream_NoCapture(b *testing.B) {
+	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			f := &fakeS3NoCapture{}
+			s := New(f, "bkt", "pfx")
+			data := make([]byte, size)
+			ctx := context.Background()
+
+			req := StreamWriteRequest{
+				Key:         "x.parquet",
+				ContentType: "application/octet-stream",
+				Write: func(w io.Writer) error {
+					_, err := w.Write(data)
+					return err
+				},
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				if err := s.WriteStream(ctx, req); err != nil {
+					b.Fatalf("WriteStream: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkSink_WriteStream_Parallel(b *testing.B) {
+	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			f := &fakeS3NoCapture{}
+			s := New(f, "bkt", "pfx")
+			data := make([]byte, size)
+			ctx := context.Background()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					req := StreamWriteRequest{
+						Key:         "x.parquet",
+						ContentType: "application/octet-stream",
+						Write: func(w io.Writer) error {
+							_, err := w.Write(data)
+							return err
+						},
+					}
+					if err := s.WriteStream(ctx, req); err != nil {
+						b.Fatalf("WriteStream: %v", err)
 					}
 				}
 			})
