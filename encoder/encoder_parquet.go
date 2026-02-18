@@ -1,31 +1,43 @@
-package ingestor
+package encoder
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 
 	"github.com/parquet-go/parquet-go"
 )
 
 type ParquetEncoder[iType any] struct {
-	// Compression (opcional): "snappy", "gzip", "zstd"
+	// Compression (optional): "", "snappy", "gzip", "zstd"
 	Compression string
 }
 
 func (e ParquetEncoder[iType]) FileExtension() string { return ".parquet" }
 
 func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, string, error) {
-	output := &bytes.Buffer{}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		default:
+		}
+	}
 
-	options := []parquet.WriterOption{}
+	output := &bytes.Buffer{}
+	options := make([]parquet.WriterOption, 0, 1)
 
 	switch e.Compression {
+	case "":
+		// no compression
 	case "snappy":
 		options = append(options, parquet.Compression(&parquet.Snappy))
 	case "gzip":
 		options = append(options, parquet.Compression(&parquet.Gzip))
 	case "zstd":
 		options = append(options, parquet.Compression(&parquet.Zstd))
+	default:
+		return nil, "", fmt.Errorf("unsupported parquet compression: %q", e.Compression)
 	}
 
 	w := parquet.NewGenericWriter[iType](output, options...)
@@ -37,6 +49,14 @@ func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byt
 
 	if err := w.Close(); err != nil {
 		return nil, "", err
+	}
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		default:
+		}
 	}
 
 	return output.Bytes(), "application/vnd.apache.parquet", nil
