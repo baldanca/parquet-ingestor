@@ -22,9 +22,9 @@ type fakeEnc[T any] struct {
 func (e *fakeEnc[T]) ContentType() string   { return e.ct }
 func (e *fakeEnc[T]) FileExtension() string { return e.ext }
 
-func (e *fakeEnc[T]) Encode(ctx context.Context, items []T) ([]byte, string, error) {
+func (e *fakeEnc[T]) Encode(ctx context.Context, items []T) ([]byte, error) {
 	// not used in tryStreamWrite tests
-	return []byte("x"), e.ct, nil
+	return []byte("x"), nil
 }
 
 func (e *fakeEnc[T]) EncodeTo(ctx context.Context, items []T, w io.Writer) error {
@@ -83,8 +83,8 @@ type fakeEncNoStream[T any] struct {
 
 func (e fakeEncNoStream[T]) ContentType() string   { return e.ct }
 func (e fakeEncNoStream[T]) FileExtension() string { return e.ext }
-func (e fakeEncNoStream[T]) Encode(ctx context.Context, items []T) ([]byte, string, error) {
-	return []byte("x"), e.ct, nil
+func (e fakeEncNoStream[T]) Encode(ctx context.Context, items []T) ([]byte, error) {
+	return []byte("x"), nil
 }
 
 var _ encoder.Encoder[int] = (*fakeEncNoStream[int])(nil)
@@ -176,8 +176,8 @@ type benchEnc struct{}
 
 func (benchEnc) ContentType() string   { return "application/vnd.apache.parquet" }
 func (benchEnc) FileExtension() string { return ".parquet" }
-func (benchEnc) Encode(ctx context.Context, items []int) ([]byte, string, error) {
-	return []byte("x"), "application/vnd.apache.parquet", nil
+func (benchEnc) Encode(ctx context.Context, items []int) ([]byte, error) {
+	return []byte("x"), nil
 }
 func (benchEnc) EncodeTo(ctx context.Context, items []int, w io.Writer) error {
 	// simulate some bytes

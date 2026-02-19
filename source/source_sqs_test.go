@@ -23,14 +23,18 @@ type fakeSQSAPI struct {
 
 	mu sync.Mutex
 
-	delErr     error
-	delFail    bool
-	delCalls   int
-	delBatches [][]string
+	delErr        error
+	delFail       bool
+	delCalls      int
+	delBatchSizes []int
+	delFirstIDs   []string // opcional, só pra debug/assert
 
 	visErr    error
 	visCalls  int
 	lastVisRH string
+
+	visBatchErr   error
+	visBatchCalls int
 }
 
 func newFakeSQSAPI(buf int) *fakeSQSAPI {
@@ -74,11 +78,13 @@ func (f *fakeSQSAPI) DeleteMessageBatch(ctx context.Context, in *sqs.DeleteMessa
 
 	f.delCalls++
 
-	ids := make([]string, 0, len(in.Entries))
-	for _, e := range in.Entries {
-		ids = append(ids, aws.ToString(e.Id))
+	// Capture barato: só tamanho do batch e (opcional) o primeiro ID.
+	f.delBatchSizes = append(f.delBatchSizes, len(in.Entries))
+	if len(in.Entries) > 0 {
+		f.delFirstIDs = append(f.delFirstIDs, aws.ToString(in.Entries[0].Id))
+	} else {
+		f.delFirstIDs = append(f.delFirstIDs, "")
 	}
-	f.delBatches = append(f.delBatches, append([]string(nil), ids...))
 
 	if f.delErr != nil {
 		return nil, f.delErr
@@ -108,6 +114,18 @@ func (f *fakeSQSAPI) ChangeMessageVisibility(ctx context.Context, in *sqs.Change
 	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 
+func (f *fakeSQSAPI) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	f.mu.Lock()
+	f.visBatchCalls++
+	err := f.visBatchErr
+	f.mu.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+	return &sqs.ChangeMessageVisibilityBatchOutput{}, nil
+}
+
 // fakeSQSNoCapture is optimized for parallel benchmarks: it doesn't capture entries
 // and only counts calls. It's thread-safe.
 type fakeSQSNoCapture struct {
@@ -119,6 +137,9 @@ type fakeSQSNoCapture struct {
 
 	visErr   error
 	visCalls int
+
+	visBatchErr   error
+	visBatchCalls int
 }
 
 func (f *fakeSQSNoCapture) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -162,6 +183,18 @@ func (f *fakeSQSNoCapture) ChangeMessageVisibility(ctx context.Context, in *sqs.
 	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 
+func (f *fakeSQSNoCapture) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	f.mu.Lock()
+	f.visBatchCalls++
+	err := f.visBatchErr
+	f.mu.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+	return &sqs.ChangeMessageVisibilityBatchOutput{}, nil
+}
+
 type testClientWrapper struct{ api sqsAPI }
 
 func (w testClientWrapper) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -172,6 +205,10 @@ func (w testClientWrapper) DeleteMessageBatch(ctx context.Context, in *sqs.Delet
 }
 func (w testClientWrapper) ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
 	return w.api.ChangeMessageVisibility(ctx, in, optFns...)
+}
+
+func (w testClientWrapper) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	return w.api.ChangeMessageVisibilityBatch(ctx, in, optFns...)
 }
 
 func newTestSourceNoPollers(ctx context.Context, api sqsAPI, queueURL string, cfg SourceSQSConfig) (*SourceSQS, context.Context) {
@@ -301,8 +338,8 @@ func TestSourceSQS_AckBatch_SendsAllInChunksOf10(t *testing.T) {
 	if f.delCalls != 3 {
 		t.Fatalf("expected 3 calls, got %d", f.delCalls)
 	}
-	if len(f.delBatches) != 3 || len(f.delBatches[0]) != 10 || len(f.delBatches[1]) != 10 || len(f.delBatches[2]) != 5 {
-		t.Fatalf("unexpected batch sizes: %#v", f.delBatches)
+	if len(f.delBatchSizes) != 3 || f.delBatchSizes[0] != 10 || f.delBatchSizes[1] != 10 || f.delBatchSizes[2] != 5 {
+		t.Fatalf("unexpected batch sizes: %#v", f.delBatchSizes)
 	}
 }
 
@@ -360,6 +397,48 @@ func TestMessage_Fail_CallsChangeVisibilityWhenConfigured(t *testing.T) {
 	if f.lastVisRH != "rh-777" {
 		t.Fatalf("expected rh-777, got %q", f.lastVisRH)
 	}
+}
+
+func TestSourceSQS_Concurrent_AckAndClose_NoPanic(t *testing.T) {
+	f := &fakeSQSNoCapture{}
+	cfg := DefaultSourceSQSConfig
+	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
+
+	ctx := context.Background()
+
+	metas := make([]AckMetadata, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		metas = append(metas, AckMetadata{ID: "id", Handle: "rh"})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(8)
+
+	for i := 0; i < 7; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = src.AckBatchMeta(ctx, metas)
+			}
+		}()
+	}
+
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 200; j++ {
+			src.Close()
+		}
+	}()
+
+	wg.Wait()
+
+	// basic sanity: should have made some calls
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.delCalls == 0 {
+		t.Fatalf("expected some delete calls")
+	}
+	_ = atomic.LoadInt64(new(int64)) // keeps atomic import used if your linter complains
 }
 
 func BenchmarkSourceSQS_AckBatch(b *testing.B) {
@@ -546,46 +625,4 @@ func BenchmarkSourceSQS_Receive_ParallelConsumers(b *testing.B) {
 			}
 		}
 	})
-}
-
-func TestSourceSQS_Concurrent_AckAndClose_NoPanic(t *testing.T) {
-	f := &fakeSQSNoCapture{}
-	cfg := DefaultSourceSQSConfig
-	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
-
-	ctx := context.Background()
-
-	metas := make([]AckMetadata, 0, 1000)
-	for i := 0; i < 1000; i++ {
-		metas = append(metas, AckMetadata{ID: "id", Handle: "rh"})
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(8)
-
-	for i := 0; i < 7; i++ {
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				_ = src.AckBatchMeta(ctx, metas)
-			}
-		}()
-	}
-
-	go func() {
-		defer wg.Done()
-		for j := 0; j < 200; j++ {
-			src.Close()
-		}
-	}()
-
-	wg.Wait()
-
-	// basic sanity: should have made some calls
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.delCalls == 0 {
-		t.Fatalf("expected some delete calls")
-	}
-	_ = atomic.LoadInt64(new(int64)) // keeps atomic import used if your linter complains
 }

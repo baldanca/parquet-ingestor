@@ -17,74 +17,54 @@ type Sourcer interface {
 	AckBatch(ctx context.Context, msgs []Message) error
 }
 
-// AckMetadata is an optional, source-agnostic acknowledgement identifier.
-//
-// Sources that can acknowledge messages more efficiently without receiving the
-// full Message objects may implement AckBatchMeta, and messages may expose their
-// AckMetadata via AckMeta.
-//
-// The meaning of ID/Handle is source-specific (e.g. MessageId/ReceiptHandle in SQS).
+type VisibilityExtender interface {
+	ExtendVisibilityBatch(ctx context.Context, metas []AckMetadata, timeoutSeconds int32) error
+}
+
 type AckMetadata struct {
 	ID     string
 	Handle string
 }
 
-// ackMetable is implemented by messages that can expose their acknowledgement metadata.
-// It's optional to keep Message minimal and source-agnostic.
 type ackMetable interface {
 	AckMeta() (AckMetadata, bool)
 }
 
-// ackMetaBatcher is an optional fast-path for sources that can acknowledge by metadata.
-// This keeps AckGroup/source generic and avoids referencing source-specific handle types.
 type ackMetaBatcher interface {
 	AckBatchMeta(ctx context.Context, metas []AckMetadata) error
 }
 
 type AckGroup struct {
-	msgs  []Message
-	metas []AckMetadata // scratch to avoid per-commit allocations on the fast path
+	msgs  []Message     // opcional: pode manter se você ainda usa em algum lugar
+	metas []AckMetadata // agora é o canonical: metas de todos os msgs que entraram
 }
 
 func (g *AckGroup) Add(m Message) {
 	g.msgs = append(g.msgs, m)
+
+	am, ok := m.(ackMetable)
+	if !ok {
+		// Se você quer "só o mais eficiente", aqui pode dar panic/erro.
+		// Ou você decide: não adiciona meta e depois falha no Commit.
+		return
+	}
+	meta, ok := am.AckMeta()
+	if !ok {
+		return
+	}
+	g.metas = append(g.metas, meta)
 }
 
 func (g *AckGroup) Commit(ctx context.Context, src Sourcer) error {
-	if len(g.msgs) == 0 {
+	if len(g.metas) == 0 {
 		return nil
 	}
-
-	// Fast path: if the source supports AckBatchMeta and all messages can expose AckMeta,
-	// acknowledge by metadata to avoid extra conversions/allocations.
-	if fast, ok := src.(ackMetaBatcher); ok {
-		g.metas = g.metas[:0]
-		if cap(g.metas) < len(g.msgs) {
-			g.metas = make([]AckMetadata, 0, len(g.msgs))
-		}
-
-		for _, m := range g.msgs {
-			if m == nil {
-				continue
-			}
-			am, ok := m.(ackMetable)
-			if !ok {
-				// Fallback if any message can't provide metadata.
-				return src.AckBatch(ctx, g.msgs)
-			}
-			meta, ok := am.AckMeta()
-			if !ok {
-				return src.AckBatch(ctx, g.msgs)
-			}
-			g.metas = append(g.metas, meta)
-		}
-		if len(g.metas) == 0 {
-			return nil
-		}
-		return fast.AckBatchMeta(ctx, g.metas)
+	fast, ok := src.(ackMetaBatcher)
+	if !ok {
+		// Se você quer só o mais eficiente, aqui pode retornar erro.
+		return src.AckBatch(ctx, g.msgs)
 	}
-
-	return src.AckBatch(ctx, g.msgs)
+	return fast.AckBatchMeta(ctx, g.metas)
 }
 
 func (g *AckGroup) Clear() {
@@ -92,6 +72,7 @@ func (g *AckGroup) Clear() {
 		g.msgs[i] = nil
 	}
 	g.msgs = g.msgs[:0]
+	g.metas = g.metas[:0]
 }
 
 func (g *AckGroup) TrimTo(targetCap int) {
@@ -102,4 +83,29 @@ func (g *AckGroup) TrimTo(targetCap int) {
 	if cap(g.msgs) > targetCap*3 {
 		g.msgs = make([]Message, 0, targetCap)
 	}
+}
+
+func (g AckGroup) Snapshot() AckGroup {
+	if len(g.msgs) > 0 {
+		cp := make([]Message, len(g.msgs))
+		copy(cp, g.msgs)
+		g.msgs = cp
+	} else {
+		g.msgs = nil
+	}
+
+	if len(g.metas) > 0 {
+		cp := make([]AckMetadata, len(g.metas))
+		copy(cp, g.metas)
+		g.metas = cp
+	} else {
+		g.metas = nil
+	}
+
+	return g
+}
+
+// Só pra lease:
+func (g *AckGroup) Metas() []AckMetadata {
+	return g.metas
 }

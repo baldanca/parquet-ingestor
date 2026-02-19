@@ -23,6 +23,8 @@ type tMsg struct {
 	size   int64
 	sizeOK bool
 
+	meta source.AckMetadata
+
 	failCalls int32
 	lastFail  atomic.Value // stores error
 }
@@ -35,6 +37,9 @@ func (m *tMsg) Fail(ctx context.Context, reason error) error {
 	return nil
 }
 
+// ✅ IMPORTANT: expose AckMeta so ack path works when batcher/acks are meta-based.
+func (m *tMsg) AckMeta() (source.AckMetadata, bool) { return m.meta, true }
+
 var _ source.Message = (*tMsg)(nil)
 
 type tSource struct {
@@ -43,7 +48,7 @@ type tSource struct {
 
 	// Ack
 	ackCalls int32
-	ackFails int32 // number of times AckBatch should fail
+	ackFails int32 // number of times ack should fail
 
 	// ordering check
 	writeDone atomic.Bool
@@ -63,7 +68,20 @@ func (s *tSource) Receive(ctx context.Context) (source.Message, error) {
 }
 
 func (s *tSource) AckBatch(ctx context.Context, msgs []source.Message) error {
-	// must only ack after write succeeded
+	// allow fallback if ever used
+	if !s.writeDone.Load() {
+		return errors.New("ack before write")
+	}
+	atomic.AddInt32(&s.ackCalls, 1)
+	if atomic.LoadInt32(&s.ackFails) > 0 {
+		atomic.AddInt32(&s.ackFails, -1)
+		return errors.New("ack fail")
+	}
+	return nil
+}
+
+// ✅ IMPORTANT: meta-based ack path (fast path). This is what AckGroup.Commit will prefer.
+func (s *tSource) AckBatchMeta(ctx context.Context, metas []source.AckMetadata) error {
 	if !s.writeDone.Load() {
 		return errors.New("ack before write")
 	}
@@ -101,9 +119,9 @@ type tEncoder struct {
 func (e *tEncoder) ContentType() string   { return e.ct }
 func (e *tEncoder) FileExtension() string { return e.ext }
 
-func (e *tEncoder) Encode(ctx context.Context, items []int) ([]byte, string, error) {
+func (e *tEncoder) Encode(ctx context.Context, items []int) ([]byte, error) {
 	atomic.AddInt32(&e.encodeCalls, 1)
-	return []byte("ENCODE"), e.ct, nil
+	return []byte("ENCODE"), nil
 }
 
 func (e *tEncoder) EncodeTo(ctx context.Context, items []int, w io.Writer) error {
@@ -156,22 +174,6 @@ func (s *tSinkOnly) Write(ctx context.Context, req sink.WriteRequest) error {
 
 var _ sink.Sinkr = (*tSinkOnly)(nil)
 
-// Encoder without streaming support.
-type tEncoderNoStream struct {
-	ct          string
-	ext         string
-	encodeCalls int32
-}
-
-func (e *tEncoderNoStream) ContentType() string   { return e.ct }
-func (e *tEncoderNoStream) FileExtension() string { return e.ext }
-func (e *tEncoderNoStream) Encode(ctx context.Context, items []int) ([]byte, string, error) {
-	atomic.AddInt32(&e.encodeCalls, 1)
-	return []byte("ENCODE"), e.ct, nil
-}
-
-var _ encoder.Encoder[int] = (*tEncoderNoStream)(nil)
-
 // ---- tests ----
 
 func TestIngestor_processMessage_TransformerFail_CallsFail(t *testing.T) {
@@ -190,7 +192,12 @@ func TestIngestor_processMessage_TransformerFail_CallsFail(t *testing.T) {
 		t.Fatalf("NewIngestor: %v", err)
 	}
 
-	m := &tMsg{env: source.Envelope{Payload: map[string]any{"a": 1}}, size: 10, sizeOK: true}
+	m := &tMsg{
+		env:    source.Envelope{Payload: map[string]any{"a": 1}},
+		size:   10,
+		sizeOK: true,
+		meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+	}
 	flushNow, err := ing.processMessage(context.Background(), m)
 	if err != nil {
 		t.Fatalf("processMessage err: %v", err)
@@ -219,7 +226,7 @@ func TestIngestor_flush_UsesStreaming_WhenAvailable(t *testing.T) {
 		t.Fatalf("NewIngestor: %v", err)
 	}
 
-	// ensure ack sees "write done" only after write succeeds
+	// ensure ack sees "write done" only after write succeeded
 	ing.SetRetryPolicy(RetryPolicyFunc(func(ctx context.Context, fn func(ctx context.Context) error) error {
 		err := fn(ctx)
 		if err == nil {
@@ -229,7 +236,12 @@ func TestIngestor_flush_UsesStreaming_WhenAvailable(t *testing.T) {
 	}))
 	ing.SetAckRetryPolicy(nopRetry{})
 
-	msg := &tMsg{env: source.Envelope{Payload: "x"}, size: 100, sizeOK: true}
+	msg := &tMsg{
+		env:    source.Envelope{Payload: "x"},
+		size:   100,
+		sizeOK: true,
+		meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+	}
 	for i := 0; i < 10; i++ {
 		_, _ = ing.processMessage(context.Background(), msg)
 	}
@@ -279,7 +291,12 @@ func TestIngestor_flush_Fallback_WhenSinkNotStream(t *testing.T) {
 		return err
 	}))
 
-	msg := &tMsg{env: source.Envelope{Payload: "x"}, size: 100, sizeOK: true}
+	msg := &tMsg{
+		env:    source.Envelope{Payload: "x"},
+		size:   100,
+		sizeOK: true,
+		meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+	}
 	for i := 0; i < 10; i++ {
 		_, _ = ing.processMessage(context.Background(), msg)
 	}
@@ -289,6 +306,9 @@ func TestIngestor_flush_Fallback_WhenSinkNotStream(t *testing.T) {
 
 	if atomic.LoadInt32(&sk.writeCalls) != 1 {
 		t.Fatalf("WriteCalls=%d want=1", sk.writeCalls)
+	}
+	if atomic.LoadInt32(&src.ackCalls) != 1 {
+		t.Fatalf("ackCalls=%d want=1", src.ackCalls)
 	}
 }
 
@@ -322,7 +342,12 @@ func TestIngestor_flush_RetriesWriteAndAck(t *testing.T) {
 		})
 	}))
 
-	msg := &tMsg{env: source.Envelope{Payload: "x"}, size: 100, sizeOK: true}
+	msg := &tMsg{
+		env:    source.Envelope{Payload: "x"},
+		size:   100,
+		sizeOK: true,
+		meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+	}
 	for i := 0; i < 10; i++ {
 		_, _ = ing.processMessage(context.Background(), msg)
 	}
@@ -384,9 +409,9 @@ type bEncoder struct {
 	ct string
 }
 
-func (e *bEncoder) Encode(ctx context.Context, items []int) ([]byte, string, error) {
+func (e *bEncoder) Encode(ctx context.Context, items []int) ([]byte, error) {
 	// simulate encoded payload (in-memory)
-	return make([]byte, 32*1024), e.ct, nil
+	return make([]byte, 32*1024), nil
 }
 func (e *bEncoder) FileExtension() string { return ".bin" }
 func (e *bEncoder) ContentType() string   { return e.ct }
@@ -397,9 +422,9 @@ type bStreamEncoder struct {
 	ct string
 }
 
-func (e *bStreamEncoder) Encode(ctx context.Context, items []int) ([]byte, string, error) {
+func (e *bStreamEncoder) Encode(ctx context.Context, items []int) ([]byte, error) {
 	// not used in streaming path, but keep for interface completeness
-	return make([]byte, 32*1024), e.ct, nil
+	return make([]byte, 32*1024), nil
 }
 func (e *bStreamEncoder) EncodeTo(ctx context.Context, items []int, w io.Writer) error {
 	// simulate streaming bytes

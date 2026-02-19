@@ -64,7 +64,7 @@ func TestParquetEncoder_FileExtension(t *testing.T) {
 
 func TestParquetEncoder_UnsupportedCompression(t *testing.T) {
 	e := ParquetEncoder[testItem]{Compression: "brotli"} // não suportado
-	_, _, err := e.Encode(context.Background(), []testItem{{ID: 1}})
+	_, err := e.Encode(context.Background(), []testItem{{ID: 1}})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -75,7 +75,7 @@ func TestParquetEncoder_ContextCanceledBefore(t *testing.T) {
 	cancel()
 
 	e := ParquetEncoder[testItem]{}
-	_, _, err := e.Encode(ctx, []testItem{{ID: 1}})
+	_, err := e.Encode(ctx, []testItem{{ID: 1}})
 	if err == nil {
 		t.Fatal("expected context error, got nil")
 	}
@@ -92,12 +92,12 @@ func TestParquetEncoder_EncodeRoundTrip_NoCompression(t *testing.T) {
 	}
 
 	e := ParquetEncoder[testItem]{Compression: ""}
-	data, ct, err := e.Encode(context.Background(), items)
+	data, err := e.Encode(context.Background(), items)
 	if err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if ct != parquetContentType {
-		t.Fatalf("contentType = %q; want %q", ct, parquetContentType)
+	if e.ContentType() != parquetContentType {
+		t.Fatalf("contentType = %q; want %q", e.ContentType(), parquetContentType)
 	}
 	if len(data) == 0 {
 		t.Fatal("expected non-empty parquet bytes")
@@ -152,12 +152,12 @@ func TestParquetEncoder_EncodeRoundTrip_WithCompression_Snappy(t *testing.T) {
 	}
 
 	e := ParquetEncoder[testItem]{Compression: "snappy"}
-	data, ct, err := e.Encode(context.Background(), items)
+	data, err := e.Encode(context.Background(), items)
 	if err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if ct != parquetContentType {
-		t.Fatalf("contentType = %q; want %q", ct, parquetContentType)
+	if e.ContentType() != parquetContentType {
+		t.Fatalf("contentType = %q; want %q", e.ContentType(), parquetContentType)
 	}
 	if len(data) == 0 {
 		t.Fatal("expected non-empty parquet bytes")
@@ -203,7 +203,7 @@ func TestParquetEncoder_ContextDeadlineExceededBefore(t *testing.T) {
 	time.Sleep(1 * time.Millisecond)
 
 	e := ParquetEncoder[testItem]{}
-	_, _, err := e.Encode(ctx, []testItem{{ID: 1, Name: "late", Value: 1}})
+	_, err := e.Encode(ctx, []testItem{{ID: 1, Name: "late", Value: 1}})
 	if err == nil {
 		t.Fatal("expected context deadline error, got nil")
 	}
@@ -243,12 +243,12 @@ func benchmarkParquetEncode(b *testing.B, n int, compression string) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		data, ct, err := enc.Encode(ctx, items)
+		data, err := enc.Encode(ctx, items)
 		if err != nil {
 			b.Fatalf("Encode error: %v", err)
 		}
-		if ct == "" || len(data) == 0 {
-			b.Fatalf("invalid result: ct=%q len=%d", ct, len(data))
+		if enc.ContentType() == "" || len(data) == 0 {
+			b.Fatalf("invalid result: ct=%q len=%d", enc.ContentType(), len(data))
 		}
 		_ = data[len(data)-1]
 	}
@@ -334,11 +334,11 @@ func BenchmarkParquetEncoder_NoCompression_Parallel(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			data, ct, err := enc.Encode(ctx, items)
+			data, err := enc.Encode(ctx, items)
 			if err != nil {
 				b.Fatalf("Encode error: %v", err)
 			}
-			if ct == "" || len(data) == 0 {
+			if enc.ContentType() == "" || len(data) == 0 {
 				b.Fatalf("invalid result")
 			}
 		}

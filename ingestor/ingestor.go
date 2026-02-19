@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/baldanca/parquet-ingestor/batcher"
@@ -31,6 +32,25 @@ type Ingestor[iType any] struct {
 	ackRetry RetryPolicy // for ack commit
 
 	batcher *batcher.Batcher[iType]
+
+	// flush workers (enabled via Run(ctx, workers, queue))
+	flushOnce    sync.Once
+	flushJobs    chan flushJob[iType]
+	flushErrCh   chan error
+	flushCancel  context.CancelFunc
+	flushWorkers int
+	flushQueue   int
+
+	// lease
+	leaseEnabled              bool
+	leaseVisibilityTimeoutSec int32
+	leaseRenewEvery           time.Duration
+}
+
+type flushJob[iType any] struct {
+	key   string
+	items []iType
+	acks  source.AckGroup
 }
 
 func NewIngestor[iType any](
@@ -62,7 +82,7 @@ func NewIngestor[iType any](
 		return nil, err
 	}
 
-	i := &Ingestor[iType]{
+	return &Ingestor[iType]{
 		batcherConfig: batcherConfig,
 		source:        source,
 		transformer:   transformer,
@@ -72,9 +92,7 @@ func NewIngestor[iType any](
 		retry:         nopRetry{},
 		ackRetry:      nopRetry{},
 		batcher:       b,
-	}
-
-	return i, nil
+	}, nil
 }
 
 func NewDefaultIngestor[iType any](
@@ -87,7 +105,6 @@ func NewDefaultIngestor[iType any](
 	return NewIngestor(batcher.DefaultBatcherConfig, source, transformer, encoder, sink, keyFunc)
 }
 
-// Optional setters to avoid breaking the constructor signature.
 func (i *Ingestor[iType]) SetRetryPolicy(p RetryPolicy) {
 	if p == nil {
 		i.retry = nopRetry{}
@@ -104,58 +121,33 @@ func (i *Ingestor[iType]) SetAckRetryPolicy(p RetryPolicy) {
 	i.ackRetry = p
 }
 
-func (i *Ingestor[iType]) RunWithWorkers(ctx context.Context, workers int) error {
-	if workers <= 1 {
-		return i.Run(ctx)
+func (i *Ingestor[iType]) EnableLease(visibilityTimeoutSec int32, renewEvery time.Duration) {
+	i.leaseEnabled = true
+	i.leaseVisibilityTimeoutSec = visibilityTimeoutSec
+	i.leaseRenewEvery = renewEvery
+}
+
+// Run starts the ingest loop. If flushWorkers > 1, flush (encode/write/ack) is done
+// concurrently by a worker pool and the ingest loop only enqueues flush jobs.
+// flushQueue bounds the number of in-flight flushes (memory bound). Fail-fast.
+func (i *Ingestor[iType]) Run(ctx context.Context, flushWorkers, flushQueue int) error {
+	if flushWorkers < 1 {
+		flushWorkers = 1
+	}
+	if flushQueue < 1 {
+		flushQueue = flushWorkers
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	i.flushWorkers = flushWorkers
+	i.flushQueue = flushQueue
+	i.maybeStartFlushPool(ctx)
 
-	errCh := make(chan error, workers)
-
-	for w := 0; w < workers; w++ {
-		worker, err := i.cloneWithNewBatcher()
-		if err != nil {
+	for {
+		// surface worker errors quickly
+		if err := i.pollFlushErr(); err != nil {
 			return err
 		}
-		go func() {
-			errCh <- worker.Run(ctx)
-		}()
-	}
 
-	var firstErr error
-	for w := 0; w < workers; w++ {
-		err := <-errCh
-		if err != nil && firstErr == nil {
-			firstErr = err
-			cancel()
-		}
-	}
-
-	return firstErr
-}
-
-func (i *Ingestor[iType]) cloneWithNewBatcher() (*Ingestor[iType], error) {
-	b, err := batcher.NewBatcher[iType](i.batcherConfig)
-	if err != nil {
-		return nil, err
-	}
-	return &Ingestor[iType]{
-		batcherConfig: i.batcherConfig,
-		source:        i.source,
-		transformer:   i.transformer,
-		encoder:       i.encoder,
-		sink:          i.sink,
-		keyFunc:       i.keyFunc,
-		retry:         i.retry,
-		ackRetry:      i.ackRetry,
-		batcher:       b,
-	}, nil
-}
-
-func (i *Ingestor[iType]) Run(ctx context.Context) error {
-	for {
 		if ctx.Err() != nil {
 			return i.flushRemainingOnStop(ctx)
 		}
@@ -178,6 +170,13 @@ func (i *Ingestor[iType]) Run(ctx context.Context) error {
 				}
 				continue
 			}
+
+			// ✅ IMPORTANT: graceful stop signaled by source (ex: nil sentinel => context.Canceled)
+			// Flush remaining buffered items before exiting.
+			if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+				return i.flushRemainingOnStop(ctx)
+			}
+
 			if ctx.Err() != nil {
 				return i.flushRemainingOnStop(ctx)
 			}
@@ -196,6 +195,60 @@ func (i *Ingestor[iType]) Run(ctx context.Context) error {
 	}
 }
 
+func (i *Ingestor[iType]) maybeStartFlushPool(ctx context.Context) {
+	if i.flushWorkers <= 1 {
+		return
+	}
+
+	i.flushOnce.Do(func() {
+		flushCtx, cancel := context.WithCancel(ctx)
+		i.flushCancel = cancel
+
+		i.flushJobs = make(chan flushJob[iType], i.flushQueue)
+		i.flushErrCh = make(chan error, 1) // first error wins (fail-fast)
+
+		for w := 0; w < i.flushWorkers; w++ {
+			go i.flushWorker(flushCtx)
+		}
+	})
+}
+
+func (i *Ingestor[iType]) flushWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job, ok := <-i.flushJobs:
+			if !ok {
+				return
+			}
+			if err := i.flushJob(ctx, job); err != nil {
+				// fail-fast: report first error and cancel
+				select {
+				case i.flushErrCh <- err:
+				default:
+				}
+				if i.flushCancel != nil {
+					i.flushCancel()
+				}
+				return
+			}
+		}
+	}
+}
+
+func (i *Ingestor[iType]) pollFlushErr() error {
+	if i.flushErrCh == nil {
+		return nil
+	}
+	select {
+	case err := <-i.flushErrCh:
+		return err
+	default:
+		return nil
+	}
+}
+
 func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message) (flushNow bool, err error) {
 	env := msg.Data()
 
@@ -205,7 +258,7 @@ func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message
 		return false, nil
 	}
 
-	sizeBytes := int64(0)
+	var sizeBytes int64
 	if n, ok := msg.EstimatedSizeBytes(); ok {
 		sizeBytes = n
 	} else {
@@ -223,6 +276,11 @@ func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message
 }
 
 func (i *Ingestor[iType]) flush(ctx context.Context) error {
+	// surface worker errors quickly
+	if err := i.pollFlushErr(); err != nil {
+		return err
+	}
+
 	batch := i.batcher.Flush()
 	if len(batch.Items) == 0 {
 		return nil
@@ -233,35 +291,62 @@ func (i *Ingestor[iType]) flush(ctx context.Context) error {
 		return err
 	}
 
+	// If pool enabled: snapshot and enqueue.
+	if i.flushJobs != nil && i.flushWorkers > 1 {
+		items := append([]iType(nil), batch.Items...) // snapshot slice
+		acks := batch.Acks.Snapshot()                 // snapshot internal slices
+
+		job := flushJob[iType]{key: key, items: items, acks: acks}
+
+		select {
+		case i.flushJobs <- job:
+			return nil
+		case err := <-i.flushErrCh:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Single-threaded fallback (no pool)
+	return i.flushJob(ctx, flushJob[iType]{key: key, items: batch.Items, acks: batch.Acks})
+}
+
+func (i *Ingestor[iType]) flushJob(ctx context.Context, job flushJob[iType]) error {
+	// Start lease if enabled and source supports it.
+	var stopLease func()
+	if i.leaseEnabled {
+		if ext, ok := i.source.(source.VisibilityExtender); ok {
+			stopLease = i.startJobLease(ctx, ext, job.acks.Metas())
+		}
+	}
+	if stopLease != nil {
+		defer stopLease()
+	}
+
 	// 1) Prefer streaming when both encoder + sink support it.
-	if streamed, err := tryStreamWrite[iType](ctx, i.encoder, i.sink, i.retry, key, batch.Items); streamed {
+	if streamed, err := tryStreamWrite(ctx, i.encoder, i.sink, i.retry, job.key, job.items); streamed {
 		if err != nil {
 			return err
 		}
 		// Ack only after successful write (with retries).
-		if err := i.ackRetry.Do(ctx, func(ctx context.Context) error {
-			return batch.Acks.Commit(ctx, i.source)
-		}); err != nil {
-			return err
-		}
-		return nil
+		return i.ackRetry.Do(ctx, func(ctx context.Context) error {
+			return job.acks.Commit(ctx, i.source)
+		})
 	}
 
 	// 2) Fallback: in-memory Encode + Write.
-	data, contentType, err := i.encoder.Encode(ctx, batch.Items)
+	data, err := i.encoder.Encode(ctx, job.items)
 	if err != nil {
 		return err
 	}
 
-	// Prefer encoder.ContentType() if Encode returned empty.
-	if contentType == "" {
-		contentType = i.encoder.ContentType()
-	}
+	contentType := i.encoder.ContentType()
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	writeReq := sink.WriteRequest{Key: key, Data: data, ContentType: contentType}
+	writeReq := sink.WriteRequest{Key: job.key, Data: data, ContentType: contentType}
 
 	// Retry sink write
 	if err := i.retry.Do(ctx, func(ctx context.Context) error {
@@ -271,13 +356,52 @@ func (i *Ingestor[iType]) flush(ctx context.Context) error {
 	}
 
 	// Ack only after successful write (with retries)
-	if err := i.ackRetry.Do(ctx, func(ctx context.Context) error {
-		return batch.Acks.Commit(ctx, i.source)
-	}); err != nil {
-		return err
+	return i.ackRetry.Do(ctx, func(ctx context.Context) error {
+		return job.acks.Commit(ctx, i.source)
+	})
+}
+
+func (i *Ingestor[iType]) startJobLease(
+	parent context.Context,
+	ext source.VisibilityExtender,
+	metas []source.AckMetadata,
+) (stop func()) {
+	if len(metas) == 0 {
+		return func() {}
 	}
 
-	return nil
+	renewEvery := i.leaseRenewEvery
+	if renewEvery <= 0 {
+		renewEvery = 20 * time.Second // fallback seguro
+	}
+
+	ctx, cancel := context.WithCancel(parent)
+
+	go func() {
+		t := time.NewTicker(renewEvery)
+		defer t.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				// best-effort: se falhar, derruba o job (fail-fast) via flushErrCh
+				if err := ext.ExtendVisibilityBatch(ctx, metas, i.leaseVisibilityTimeoutSec); err != nil {
+					select {
+					case i.flushErrCh <- err:
+					default:
+					}
+					if i.flushCancel != nil {
+						i.flushCancel()
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	return cancel
 }
 
 func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
@@ -285,14 +409,35 @@ func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
 	base := context.WithoutCancel(ctx)
 	stopCtx, cancel := context.WithTimeout(base, 10*time.Second)
 	defer cancel()
-	return i.flush(stopCtx)
+
+	// flush what's currently in the batcher (enqueue or inline)
+	if err := i.flush(stopCtx); err != nil {
+		return err
+	}
+
+	// If no pool, done.
+	if i.flushJobs == nil || i.flushWorkers <= 1 {
+		return nil
+	}
+
+	// close queue so workers exit after draining
+	close(i.flushJobs)
+
+	// wait for first error or timeout; otherwise best-effort success
+	select {
+	case err := <-i.flushErrCh:
+		return err
+	case <-stopCtx.Done():
+		return stopCtx.Err()
+	default:
+		return nil
+	}
 }
 
-// DefaultKeyFunc partitions by time and avoids collisions (good for multiple workers).
+// DefaultKeyFunc partitions by time and avoids collisions (good for concurrent flush workers).
 func DefaultKeyFunc[iType any](enc encoder.Encoder[iType]) KeyFunc[iType] {
 	ext := enc.FileExtension()
 	if ext == "" || ext[0] != '.' {
-		// Defensive: keep keys consistent.
 		ext = ".bin"
 	}
 	return func(ctx context.Context, batch batcher.Batch[iType]) (string, error) {

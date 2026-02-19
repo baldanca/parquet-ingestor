@@ -6,7 +6,7 @@ import (
 )
 
 type Encoder[iType any] interface {
-	Encode(ctx context.Context, items []iType) (data []byte, contentType string, err error)
+	Encode(ctx context.Context, items []iType) (data []byte, err error)
 	FileExtension() string
 	ContentType() string
 }

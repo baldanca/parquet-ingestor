@@ -40,22 +40,21 @@ func (e ParquetEncoder[iType]) EncodeTo(ctx context.Context, items []iType, w io
 		}
 	}
 
-	comp := strings.ToLower(strings.TrimSpace(e.Compression))
+	comp := strings.TrimSpace(e.Compression)
 
-	var wopts []parquet.WriterOption
-	switch comp {
-	case "":
-	case "snappy":
-		wopts = []parquet.WriterOption{parquet.Compression(&parquet.Snappy)}
-	case "gzip":
-		wopts = []parquet.WriterOption{parquet.Compression(&parquet.Gzip)}
-	case "zstd":
-		wopts = []parquet.WriterOption{parquet.Compression(&parquet.Zstd)}
+	var pw *parquet.GenericWriter[iType]
+	switch {
+	case comp == "":
+		pw = parquet.NewGenericWriter[iType](w)
+	case strings.EqualFold(comp, "snappy"):
+		pw = parquet.NewGenericWriter[iType](w, parquet.Compression(&parquet.Snappy))
+	case strings.EqualFold(comp, "gzip"):
+		pw = parquet.NewGenericWriter[iType](w, parquet.Compression(&parquet.Gzip))
+	case strings.EqualFold(comp, "zstd"):
+		pw = parquet.NewGenericWriter[iType](w, parquet.Compression(&parquet.Zstd))
 	default:
 		return fmt.Errorf("unsupported parquet compression: %q", e.Compression)
 	}
-
-	pw := parquet.NewGenericWriter[iType](w, wopts...)
 
 	if _, err := pw.Write(items); err != nil {
 		_ = pw.Close()
@@ -77,7 +76,7 @@ func (e ParquetEncoder[iType]) EncodeTo(ctx context.Context, items []iType, w io
 	return nil
 }
 
-func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, string, error) {
+func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byte, error) {
 	buf := parquetBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 
@@ -92,11 +91,11 @@ func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byt
 	err := e.EncodeTo(ctx, items, buf)
 	if err != nil {
 		parquetBufferPool.Put(buf)
-		return nil, "", err
+		return nil, err
 	}
 
 	out := append([]byte(nil), buf.Bytes()...)
 	parquetBufferPool.Put(buf)
 
-	return out, parquetContentType, nil
+	return out, nil
 }
