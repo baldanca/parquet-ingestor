@@ -1,33 +1,46 @@
 package ingestor
 
-/*
-type KeyFunc[iType any] func(ctx context.Context, batch Batch[iType]) (key string, err error)
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/baldanca/parquet-ingestor/batcher"
+	"github.com/baldanca/parquet-ingestor/encoder"
+	"github.com/baldanca/parquet-ingestor/sink"
+	"github.com/baldanca/parquet-ingestor/source"
+	"github.com/baldanca/parquet-ingestor/transformer"
+)
+
+type KeyFunc[iType any] func(ctx context.Context, batch batcher.Batch[iType]) (key string, err error)
 
 type Ingestor[iType any] struct {
-	cfg Config
+	batcherConfig batcher.BatcherConfig
+	source        source.Sourcer
+	transformer   transformer.Transformer[source.Envelope, iType]
+	encoder       encoder.Encoder[iType]
+	sink          sink.Sinkr
+	keyFunc       KeyFunc[iType]
 
-	source      Source
-	transformer Transformer[Envelope, iType]
-	encoder     Encoder[iType]
-	sink        Sink
-	keyFunc     KeyFunc[iType]
-	retry       RetryPolicy
-	ackRetry    RetryPolicy
+	// retries
+	retry    RetryPolicy // for sink write
+	ackRetry RetryPolicy // for ack commit
 
-	batcher *Batcher[iType]
+	batcher *batcher.Batcher[iType]
 }
 
 func NewIngestor[iType any](
-	cfg Config,
-	source Source,
-	transformer Transformer[Envelope, iType],
-	encoder Encoder[iType],
-	sink Sink,
+	batcherConfig batcher.BatcherConfig,
+	source source.Sourcer,
+	transformer transformer.Transformer[source.Envelope, iType],
+	encoder encoder.Encoder[iType],
+	sink sink.Sinkr,
 	keyFunc KeyFunc[iType],
 ) (*Ingestor[iType], error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
 	if source == nil {
 		return nil, fmt.Errorf("source is nil")
 	}
@@ -44,49 +57,53 @@ func NewIngestor[iType any](
 		return nil, fmt.Errorf("keyFunc is nil")
 	}
 
-	b, err := NewBatcher[iType](cfg)
+	b, err := batcher.NewBatcher[iType](batcherConfig)
 	if err != nil {
 		return nil, err
 	}
 
 	i := &Ingestor[iType]{
-		cfg:         cfg,
-		source:      source,
-		transformer: transformer,
-		encoder:     encoder,
-		sink:        sink,
-		keyFunc:     keyFunc,
-		batcher:     b,
+		batcherConfig: batcherConfig,
+		source:        source,
+		transformer:   transformer,
+		encoder:       encoder,
+		sink:          sink,
+		keyFunc:       keyFunc,
+		retry:         nopRetry{},
+		ackRetry:      nopRetry{},
+		batcher:       b,
 	}
 
-	if i.cfg.RetryPolicy != nil {
-		i.retry = i.cfg.RetryPolicy
-	} else {
-		i.retry = nopRetry{}
-	}
-	if i.cfg.AckRetryPolicy != nil {
-		i.ackRetry = i.cfg.AckRetryPolicy
-	} else {
-		i.ackRetry = nopRetry{}
-	}
 	return i, nil
 }
 
 func NewDefaultIngestor[iType any](
-	source Source,
-	transformer Transformer[Envelope, iType],
-	encoder Encoder[iType],
-	sink Sink,
+	source source.Sourcer,
+	transformer transformer.Transformer[source.Envelope, iType],
+	encoder encoder.Encoder[iType],
+	sink sink.Sinkr,
 	keyFunc KeyFunc[iType],
 ) (*Ingestor[iType], error) {
-	return NewIngestor(DefaultConfig, source, transformer, encoder, sink, keyFunc)
+	return NewIngestor(batcher.DefaultBatcherConfig, source, transformer, encoder, sink, keyFunc)
 }
 
-// RunWithWorkers roda N workers em paralelo, cada um com seu próprio Batcher.
-//
-// Requisitos:
-// - Source deve ser seguro para chamadas concorrentes de Receive/AckBatch.
-// - Transformer/Encoder/Sink também devem tolerar concorrência (ou envolva com mutex externamente).
+// Optional setters to avoid breaking the constructor signature.
+func (i *Ingestor[iType]) SetRetryPolicy(p RetryPolicy) {
+	if p == nil {
+		i.retry = nopRetry{}
+		return
+	}
+	i.retry = p
+}
+
+func (i *Ingestor[iType]) SetAckRetryPolicy(p RetryPolicy) {
+	if p == nil {
+		i.ackRetry = nopRetry{}
+		return
+	}
+	i.ackRetry = p
+}
+
 func (i *Ingestor[iType]) RunWithWorkers(ctx context.Context, workers int) error {
 	if workers <= 1 {
 		return i.Run(ctx)
@@ -120,29 +137,23 @@ func (i *Ingestor[iType]) RunWithWorkers(ctx context.Context, workers int) error
 }
 
 func (i *Ingestor[iType]) cloneWithNewBatcher() (*Ingestor[iType], error) {
-	b, err := NewBatcher[iType](i.cfg)
+	b, err := batcher.NewBatcher[iType](i.batcherConfig)
 	if err != nil {
 		return nil, err
 	}
 	return &Ingestor[iType]{
-		cfg:         i.cfg,
-		source:      i.source,
-		transformer: i.transformer,
-		encoder:     i.encoder,
-		sink:        i.sink,
-		keyFunc:     i.keyFunc,
-		retry:       i.retry,
-		ackRetry:    i.ackRetry,
-		batcher:     b,
+		batcherConfig: i.batcherConfig,
+		source:        i.source,
+		transformer:   i.transformer,
+		encoder:       i.encoder,
+		sink:          i.sink,
+		keyFunc:       i.keyFunc,
+		retry:         i.retry,
+		ackRetry:      i.ackRetry,
+		batcher:       b,
 	}, nil
 }
 
-// Run processa mensagens e faz flush por:
-// - tamanho/quantidade (via b.batcher.Add)
-// - tempo (deadline aplicada ao Receive)
-//
-// Backpressure: o loop é síncrono. Se Transformer/Encoder/Sink forem lentos, o Receive será naturalmente pressionado
-// (menos chamadas por segundo), evitando crescimento de memória.
 func (i *Ingestor[iType]) Run(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
@@ -185,13 +196,12 @@ func (i *Ingestor[iType]) Run(ctx context.Context) error {
 	}
 }
 
-func (i *Ingestor[iType]) processMessage(ctx context.Context, msg Message) (flushNow bool, err error) {
+func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message) (flushNow bool, err error) {
 	env := msg.Data()
 
 	out, err := i.transformer.Transform(ctx, env)
 	if err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrTransform, err)
-		_ = msg.Fail(ctx, wrapped)
+		_ = msg.Fail(ctx, err)
 		return false, nil
 	}
 
@@ -199,12 +209,10 @@ func (i *Ingestor[iType]) processMessage(ctx context.Context, msg Message) (flus
 	if n, ok := msg.EstimatedSizeBytes(); ok {
 		sizeBytes = n
 	} else {
-		// Slow fallback – prefer implementing EstimatedSizeBytes in your Source.
 		var sizeErr error
 		sizeBytes, sizeErr = estimateSizeBytesFallback(env.Payload)
 		if sizeErr != nil {
-			wrapped := fmt.Errorf("%w: %v", ErrTransform, sizeErr)
-			_ = msg.Fail(ctx, wrapped)
+			_ = msg.Fail(ctx, sizeErr)
 			return false, nil
 		}
 	}
@@ -225,29 +233,48 @@ func (i *Ingestor[iType]) flush(ctx context.Context) error {
 		return err
 	}
 
+	// 1) Prefer streaming when both encoder + sink support it.
+	if streamed, err := tryStreamWrite[iType](ctx, i.encoder, i.sink, i.retry, key, batch.Items); streamed {
+		if err != nil {
+			return err
+		}
+		// Ack only after successful write (with retries).
+		if err := i.ackRetry.Do(ctx, func(ctx context.Context) error {
+			return batch.Acks.Commit(ctx, i.source)
+		}); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// 2) Fallback: in-memory Encode + Write.
 	data, contentType, err := i.encoder.Encode(ctx, batch.Items)
 	if err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrEncode, err)
-		return wrapped
+		return err
+	}
+
+	// Prefer encoder.ContentType() if Encode returned empty.
+	if contentType == "" {
+		contentType = i.encoder.ContentType()
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	writeReq := WriteRequest{Key: key, Data: data, ContentType: contentType}
+	writeReq := sink.WriteRequest{Key: key, Data: data, ContentType: contentType}
+
+	// Retry sink write
 	if err := i.retry.Do(ctx, func(ctx context.Context) error {
 		return i.sink.Write(ctx, writeReq)
 	}); err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrSinkWrite, err)
-		return wrapped
+		return err
 	}
 
-	// Só ack depois do write com sucesso
+	// Ack only after successful write (with retries)
 	if err := i.ackRetry.Do(ctx, func(ctx context.Context) error {
 		return batch.Acks.Commit(ctx, i.source)
 	}); err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrAck, err)
-		return wrapped
+		return err
 	}
 
 	return nil
@@ -262,13 +289,13 @@ func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
 }
 
 // DefaultKeyFunc partitions by time and avoids collisions (good for multiple workers).
-func DefaultKeyFunc[iType any](enc Encoder[iType]) KeyFunc[iType] {
+func DefaultKeyFunc[iType any](enc encoder.Encoder[iType]) KeyFunc[iType] {
 	ext := enc.FileExtension()
 	if ext == "" || ext[0] != '.' {
 		// Defensive: keep keys consistent.
 		ext = ".bin"
 	}
-	return func(ctx context.Context, batch Batch[iType]) (string, error) {
+	return func(ctx context.Context, batch batcher.Batch[iType]) (string, error) {
 		_ = ctx
 		_ = batch
 
@@ -277,7 +304,7 @@ func DefaultKeyFunc[iType any](enc Encoder[iType]) KeyFunc[iType] {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("ingestor/%04d/%02d/%02d/%02d/%d-%s%s",
+		return fmt.Sprintf("%04d/%02d/%02d/%02d/%d-%s%s",
 			now.Year(), int(now.Month()), now.Day(), now.Hour(), now.UnixNano(), suffix, ext,
 		), nil
 	}
@@ -298,4 +325,3 @@ func randomHex(nBytes int) (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-*/

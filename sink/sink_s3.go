@@ -98,8 +98,8 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	if req.Key == "" {
 		return fmt.Errorf("empty key")
 	}
-	if req.Write == nil {
-		return fmt.Errorf("nil write func")
+	if req.Writer == nil {
+		return fmt.Errorf("nil writer")
 	}
 
 	// Use pooled scratch to avoid per-call heap allocations from escaping locals.
@@ -109,12 +109,12 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	// Build key sem path-clean.
 	key := trimLeftSlashes(req.Key)
 	if s.prefix != "" {
-		sc.b.Reset()
-		sc.b.Grow(len(s.prefix) + 1 + len(key))
-		sc.b.WriteString(s.prefix)
-		sc.b.WriteByte('/')
-		sc.b.WriteString(key)
-		sc.key = sc.b.String()
+		sc.sb.Reset()
+		sc.sb.Grow(len(s.prefix) + 1 + len(key))
+		sc.sb.WriteString(s.prefix)
+		sc.sb.WriteByte('/')
+		sc.sb.WriteString(key)
+		sc.key = sc.sb.String()
 	} else {
 		sc.key = key
 	}
@@ -131,12 +131,17 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	// If PutObject returns early (ctx cancel / network error), close reader to unblock writer.
 	defer pr.Close()
 
-	// Produce the body in a goroutine.
-	writeErrCh := make(chan error, 1)
+	var (
+		wg   sync.WaitGroup
+		werr error
+	)
+
+	wg.Add(1)
 	go func() {
-		err := req.Write(pw)
+		defer wg.Done()
+		err := req.Writer.WriteTo(pw)
+		werr = err
 		_ = pw.CloseWithError(err)
-		writeErrCh <- err
 	}()
 
 	sc.in.Bucket = s.bucketPtr
@@ -148,11 +153,13 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	_, err := s.client.PutObject(ctx, &sc.in)
 	if err != nil {
 		_ = pr.CloseWithError(err)
+		wg.Wait()
 		return fmt.Errorf("put s3 object key=%q: %w", key, err)
 	}
 
 	// Ensure producer finished (and surface producer errors even if S3 accepted fast).
-	if werr := <-writeErrCh; werr != nil {
+	wg.Wait()
+	if werr != nil {
 		return fmt.Errorf("stream write key=%q: %w", key, werr)
 	}
 	return nil
@@ -165,6 +172,7 @@ type putScratch struct {
 	cl   int64
 	body bytes.Reader
 	b    strings.Builder
+	sb   strings.Builder
 }
 
 func trimLeftSlashes(s string) string {

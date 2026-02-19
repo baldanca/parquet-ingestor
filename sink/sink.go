@@ -11,12 +11,18 @@ type WriteRequest struct {
 	ContentType string
 }
 
+// StreamWriter represents something that can write its contents to a destination writer.
+// This avoids allocating function closures in hot paths.
+type StreamWriter interface {
+	WriteTo(w io.Writer) error
+}
+
 type StreamWriteRequest struct {
 	Key         string
 	ContentType string
-	// Write is called with a writer that streams directly to the destination.
-	// The implementation must return when done writing.
-	Write func(w io.Writer) error
+	// Writer streams directly to the destination.
+	// Implementations must return when done writing.
+	Writer StreamWriter
 }
 
 type Sinkr interface {
