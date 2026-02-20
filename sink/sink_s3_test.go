@@ -48,7 +48,6 @@ func (f *fakeS3API) PutObject(ctx context.Context, in *s3.PutObjectInput, _ ...f
 	return &s3.PutObjectOutput{}, nil
 }
 
-// no-capture fake for benchmarks: minimal overhead, no body reads/copies.
 type fakeS3NoCapture struct {
 	mu       sync.Mutex
 	putCalls int
@@ -65,7 +64,6 @@ func (f *fakeS3NoCapture) PutObject(ctx context.Context, in *s3.PutObjectInput, 
 		return nil, err
 	}
 
-	// IMPORTANT: drain body to avoid io.Pipe deadlock in streaming benchmarks.
 	if in.Body != nil {
 		_, derr := io.Copy(io.Discard, in.Body)
 		if derr != nil {
@@ -75,8 +73,6 @@ func (f *fakeS3NoCapture) PutObject(ctx context.Context, in *s3.PutObjectInput, 
 
 	return &s3.PutObjectOutput{}, nil
 }
-
-// ---- StreamWriter helpers (new API) ----
 
 type bytesStreamWriter struct {
 	b []byte
@@ -98,7 +94,7 @@ func (w errStreamWriter) WriteTo(dst io.Writer) error {
 
 func TestSink_Write_BuildsKeyWithPrefixWithoutCleaning(t *testing.T) {
 	f := &fakeS3API{}
-	s := New(f, "bkt", "/pfx/")
+	s := NewSinkS3(f, "bkt", "/pfx/")
 
 	data := []byte("abc")
 	err := s.Write(context.Background(), WriteRequest{
@@ -135,7 +131,7 @@ func TestSink_Write_BuildsKeyWithPrefixWithoutCleaning(t *testing.T) {
 
 func TestSink_Write_EmptyKeyReturnsError(t *testing.T) {
 	f := &fakeS3API{}
-	s := New(f, "bkt", "")
+	s := NewSinkS3(f, "bkt", "")
 	if err := s.Write(context.Background(), WriteRequest{Key: ""}); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -144,7 +140,7 @@ func TestSink_Write_EmptyKeyReturnsError(t *testing.T) {
 func TestSink_Write_PropagatesPutError(t *testing.T) {
 	boom := errors.New("boom")
 	f := &fakeS3API{putErr: boom}
-	s := New(f, "bkt", "p")
+	s := NewSinkS3(f, "bkt", "p")
 	if err := s.Write(context.Background(), WriteRequest{Key: "x", Data: []byte("1")}); !errors.Is(err, boom) {
 		t.Fatalf("expected boom, got %v", err)
 	}
@@ -152,7 +148,7 @@ func TestSink_Write_PropagatesPutError(t *testing.T) {
 
 func TestSink_WriteStream_BuildsKeyWithPrefixWithoutCleaning(t *testing.T) {
 	f := &fakeS3API{}
-	s := New(f, "bkt", "/pfx/")
+	s := NewSinkS3(f, "bkt", "/pfx/")
 
 	data := []byte("stream-abc")
 	err := s.WriteStream(context.Background(), StreamWriteRequest{
@@ -189,7 +185,7 @@ func TestSink_WriteStream_BuildsKeyWithPrefixWithoutCleaning(t *testing.T) {
 
 func TestSink_WriteStream_EmptyKeyReturnsError(t *testing.T) {
 	f := &fakeS3API{}
-	s := New(f, "bkt", "")
+	s := NewSinkS3(f, "bkt", "")
 	if err := s.WriteStream(context.Background(), StreamWriteRequest{Key: "", Writer: bytesStreamWriter{b: nil}}); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -198,7 +194,7 @@ func TestSink_WriteStream_EmptyKeyReturnsError(t *testing.T) {
 func TestSink_WriteStream_PropagatesPutError(t *testing.T) {
 	boom := errors.New("boom")
 	f := &fakeS3API{putErr: boom}
-	s := New(f, "bkt", "p")
+	s := NewSinkS3(f, "bkt", "p")
 	err := s.WriteStream(context.Background(), StreamWriteRequest{
 		Key:    "x",
 		Writer: bytesStreamWriter{b: []byte("1")},
@@ -211,7 +207,7 @@ func TestSink_WriteStream_PropagatesPutError(t *testing.T) {
 func TestSink_WriteStream_PropagatesWriterError(t *testing.T) {
 	boom := errors.New("writer boom")
 	f := &fakeS3API{}
-	s := New(f, "bkt", "p")
+	s := NewSinkS3(f, "bkt", "p")
 	err := s.WriteStream(context.Background(), StreamWriteRequest{
 		Key:    "x",
 		Writer: errStreamWriter{err: boom},
@@ -228,7 +224,7 @@ func BenchmarkSink_Write_NoCapture(b *testing.B) {
 	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
 		b.Run(fmt.Sprintf("size=%s", strconv.Itoa(size)), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
-			s := New(f, "bkt", "pfx")
+			s := NewSinkS3(f, "bkt", "pfx")
 			data := make([]byte, size)
 			req := WriteRequest{Key: "x.parquet", Data: data, ContentType: "application/octet-stream"}
 			ctx := context.Background()
@@ -244,16 +240,14 @@ func BenchmarkSink_Write_NoCapture(b *testing.B) {
 	}
 }
 
-// Measures the Sink cost under contention without benchmark noise from generating unique keys.
 func BenchmarkSink_Write_NoCapture_Parallel_StaticKey(b *testing.B) {
 	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
-			s := New(f, "bkt", "pfx")
+			s := NewSinkS3(f, "bkt", "pfx")
 			data := make([]byte, size)
 			ctx := context.Background()
 
-			// constant key: isolates Sink.Write overhead
 			req := WriteRequest{Key: "x.parquet", Data: data, ContentType: "application/octet-stream"}
 
 			b.ReportAllocs()
@@ -269,14 +263,10 @@ func BenchmarkSink_Write_NoCapture_Parallel_StaticKey(b *testing.B) {
 	}
 }
 
-// Measures parallel writes with varying keys but WITHOUT per-iteration formatting.
-// Keys are precomputed up-front and then indexed with an atomic counter.
 func BenchmarkSink_Write_NoCapture_Parallel_PrecomputedKeys(b *testing.B) {
-	// power of two for cheap modulo with bitmask
 	const keyCount = 1 << 16
 	keys := make([]string, 0, keyCount)
 	for i := 0; i < keyCount; i++ {
-		// keep it reasonably sized and unique enough
 		keys = append(keys, fmt.Sprintf("x/%d.parquet", i))
 	}
 	mask := uint64(keyCount - 1)
@@ -284,7 +274,7 @@ func BenchmarkSink_Write_NoCapture_Parallel_PrecomputedKeys(b *testing.B) {
 	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
-			s := New(f, "bkt", "pfx")
+			s := NewSinkS3(f, "bkt", "pfx")
 			data := make([]byte, size)
 			ctx := context.Background()
 
@@ -309,7 +299,7 @@ func BenchmarkSink_WriteStream_NoCapture(b *testing.B) {
 	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
-			s := New(f, "bkt", "pfx")
+			s := NewSinkS3(f, "bkt", "pfx")
 			data := make([]byte, size)
 			ctx := context.Background()
 
@@ -335,7 +325,7 @@ func BenchmarkSink_WriteStream_Parallel(b *testing.B) {
 	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
-			s := New(f, "bkt", "pfx")
+			s := NewSinkS3(f, "bkt", "pfx")
 			data := make([]byte, size)
 			ctx := context.Background()
 

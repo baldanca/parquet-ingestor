@@ -212,8 +212,6 @@ func TestParquetEncoder_ContextDeadlineExceededBefore(t *testing.T) {
 	}
 }
 
-// -------------------- Benchmarks --------------------
-
 type benchItem struct {
 	ID    int64   `parquet:"name=id"`
 	Name  string  `parquet:"name=name"`
@@ -232,7 +230,7 @@ func makeBenchItems(n int) []benchItem {
 	return items
 }
 
-func benchmarkParquetEncode(b *testing.B, n int, compression string) {
+func benchmarkParquetEncode(b *testing.B, n int, compression ParquetCompression) {
 	b.Helper()
 
 	items := makeBenchItems(n)
@@ -254,7 +252,7 @@ func benchmarkParquetEncode(b *testing.B, n int, compression string) {
 	}
 }
 
-func benchmarkParquetEncodeToDiscard(b *testing.B, n int, compression string) {
+func benchmarkParquetEncodeToDiscard(b *testing.B, n int, compression ParquetCompression) {
 	b.Helper()
 
 	items := makeBenchItems(n)
@@ -287,7 +285,7 @@ func BenchmarkParquetEncoder_NoCompression(b *testing.B) {
 func BenchmarkParquetEncoder_NoCompression_EncodeToDiscard(b *testing.B) {
 	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
-			benchmarkParquetEncodeToDiscard(b, n, "")
+			benchmarkParquetEncodeToDiscard(b, n, ParquetCompressionNone)
 		})
 	}
 }
@@ -295,7 +293,7 @@ func BenchmarkParquetEncoder_NoCompression_EncodeToDiscard(b *testing.B) {
 func BenchmarkParquetEncoder_Snappy(b *testing.B) {
 	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
-			benchmarkParquetEncode(b, n, "snappy")
+			benchmarkParquetEncode(b, n, ParquetCompressionSnappy)
 		})
 	}
 }

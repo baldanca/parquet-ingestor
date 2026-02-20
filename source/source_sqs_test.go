@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +14,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
+
+//
+// Fakes
+//
 
 type fakeSQSAPI struct {
 	recvCh  chan *sqs.ReceiveMessageOutput
@@ -27,7 +29,7 @@ type fakeSQSAPI struct {
 	delFail       bool
 	delCalls      int
 	delBatchSizes []int
-	delFirstIDs   []string // opcional, só pra debug/assert
+	delFirstIDs   []string
 
 	visErr    error
 	visCalls  int
@@ -77,8 +79,6 @@ func (f *fakeSQSAPI) DeleteMessageBatch(ctx context.Context, in *sqs.DeleteMessa
 	defer f.mu.Unlock()
 
 	f.delCalls++
-
-	// Capture barato: só tamanho do batch e (opcional) o primeiro ID.
 	f.delBatchSizes = append(f.delBatchSizes, len(in.Entries))
 	if len(in.Entries) > 0 {
 		f.delFirstIDs = append(f.delFirstIDs, aws.ToString(in.Entries[0].Id))
@@ -106,8 +106,10 @@ func (f *fakeSQSAPI) DeleteMessageBatch(ctx context.Context, in *sqs.DeleteMessa
 func (f *fakeSQSAPI) ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	f.visCalls++
 	f.lastVisRH = aws.ToString(in.ReceiptHandle)
+
 	if f.visErr != nil {
 		return nil, f.visErr
 	}
@@ -126,8 +128,6 @@ func (f *fakeSQSAPI) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.C
 	return &sqs.ChangeMessageVisibilityBatchOutput{}, nil
 }
 
-// fakeSQSNoCapture is optimized for parallel benchmarks: it doesn't capture entries
-// and only counts calls. It's thread-safe.
 type fakeSQSNoCapture struct {
 	mu sync.Mutex
 
@@ -143,7 +143,6 @@ type fakeSQSNoCapture struct {
 }
 
 func (f *fakeSQSNoCapture) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
-	// Not used in these ack benchmarks.
 	return &sqs.ReceiveMessageOutput{}, nil
 }
 
@@ -195,6 +194,10 @@ func (f *fakeSQSNoCapture) ChangeMessageVisibilityBatch(ctx context.Context, in 
 	return &sqs.ChangeMessageVisibilityBatchOutput{}, nil
 }
 
+//
+// Test client wrapper + constructors
+//
+
 type testClientWrapper struct{ api sqsAPI }
 
 func (w testClientWrapper) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -206,21 +209,24 @@ func (w testClientWrapper) DeleteMessageBatch(ctx context.Context, in *sqs.Delet
 func (w testClientWrapper) ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
 	return w.api.ChangeMessageVisibility(ctx, in, optFns...)
 }
-
 func (w testClientWrapper) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
 	return w.api.ChangeMessageVisibilityBatch(ctx, in, optFns...)
 }
 
+// Matches production pattern: queueURLPtr points to s.queueURL.
 func newTestSourceNoPollers(ctx context.Context, api sqsAPI, queueURL string, cfg SourceSQSConfig) (*SourceSQS, context.Context) {
 	cfg.validate()
-	ctx2, cancel := context.WithCancel(ctx)
-	return &SourceSQS{
+	pollCtx, cancel := context.WithCancel(ctx)
+
+	s := &SourceSQS{
 		cfg:      cfg,
 		client:   testClientWrapper{api: api},
 		queueURL: queueURL,
 		bufCh:    make(chan *sqstypes.Message, cfg.BufSize),
 		cancel:   cancel,
-	}, ctx2
+	}
+	s.queueURLPtr = &s.queueURL
+	return s, pollCtx
 }
 
 func newTestSource(ctx context.Context, api sqsAPI, queueURL string, cfg SourceSQSConfig) *SourceSQS {
@@ -229,19 +235,13 @@ func newTestSource(ctx context.Context, api sqsAPI, queueURL string, cfg SourceS
 	return s
 }
 
-func makeInternalMsg(src *SourceSQS, id, rh string) *message {
-	return &message{
-		src: src,
-		m: &sqstypes.Message{
-			MessageId:     aws.String(id),
-			ReceiptHandle: aws.String(rh),
-			Body:          aws.String("x"),
-		},
-	}
-}
+//
+// Tests
+//
 
 func TestSourceSQS_Receive_DeliversMessages(t *testing.T) {
 	f := newFakeSQSAPI(10)
+
 	cfg := DefaultSourceSQSConfig
 	cfg.WaitTimeSeconds = 0
 	cfg.Pollers = 1
@@ -259,7 +259,7 @@ func TestSourceSQS_Receive_DeliversMessages(t *testing.T) {
 	src := newTestSource(context.Background(), f, "q", cfg)
 	defer src.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	m1, err := src.Receive(ctx)
@@ -278,6 +278,7 @@ func TestSourceSQS_Receive_DeliversMessages(t *testing.T) {
 
 func TestSourceSQS_Receive_ContextCancel(t *testing.T) {
 	f := newFakeSQSAPI(1)
+
 	cfg := DefaultSourceSQSConfig
 	cfg.Pollers = 1
 	cfg.BufSize = 1
@@ -297,8 +298,9 @@ func TestSourceSQS_Receive_ContextCancel(t *testing.T) {
 	}
 }
 
-func TestSourceSQS_Close_ReceiveEventuallyReturnsError(t *testing.T) {
+func TestSourceSQS_Close_ReceiveEventuallyReturnsErrClosed(t *testing.T) {
 	f := newFakeSQSAPI(1)
+
 	cfg := DefaultSourceSQSConfig
 	cfg.WaitTimeSeconds = 0
 	cfg.Pollers = 1
@@ -307,29 +309,39 @@ func TestSourceSQS_Close_ReceiveEventuallyReturnsError(t *testing.T) {
 	src := newTestSource(context.Background(), f, "q", cfg)
 	src.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	for {
+	for tries := 0; tries < 10_000; tries++ {
 		_, err := src.Receive(ctx)
 		if err != nil {
+			if !errors.Is(err, ErrClosed) {
+				t.Fatalf("expected ErrClosed, got %v", err)
+			}
 			return
 		}
+		runtime.Gosched()
 	}
+
+	t.Fatalf("Receive did not return ErrClosed within expected attempts")
 }
 
-func TestSourceSQS_AckBatch_SendsAllInChunksOf10(t *testing.T) {
+func TestSourceSQS_AckBatchMeta_SendsAllInChunksOf10(t *testing.T) {
 	f := newFakeSQSAPI(1)
+
 	cfg := DefaultSourceSQSConfig
 	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
 
-	handles := make([]ackHandle, 0, 25)
+	metas := make([]AckMetadata, 0, 25)
 	for i := 0; i < 25; i++ {
-		handles = append(handles, makeInternalMsg(src, fmt.Sprintf("id-%d", i), fmt.Sprintf("rh-%d", i)).AckHandle())
+		metas = append(metas, AckMetadata{
+			ID:     fmt.Sprintf("id-%d", i),
+			Handle: fmt.Sprintf("rh-%d", i),
+		})
 	}
 
-	if err := src.ackHandlesBatch(context.Background(), handles); err != nil {
-		t.Fatalf("ackHandlesBatch: %v", err)
+	if err := src.AckBatchMeta(context.Background(), metas); err != nil {
+		t.Fatalf("AckBatchMeta: %v", err)
 	}
 
 	f.mu.Lock()
@@ -343,35 +355,47 @@ func TestSourceSQS_AckBatch_SendsAllInChunksOf10(t *testing.T) {
 	}
 }
 
-func TestSourceSQS_AckBatch_ReturnsErrorOnFailedEntry(t *testing.T) {
+func TestSourceSQS_AckBatchMeta_ReturnsErrorOnFailedEntry(t *testing.T) {
 	f := newFakeSQSAPI(1)
 	f.delFail = true
+
 	cfg := DefaultSourceSQSConfig
 	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
 
-	handles := []ackHandle{
-		makeInternalMsg(src, "id-0", "rh-0").AckHandle(),
-		makeInternalMsg(src, "id-1", "rh-1").AckHandle(),
+	metas := []AckMetadata{
+		{ID: "id-0", Handle: "rh-0"},
+		{ID: "id-1", Handle: "rh-1"},
 	}
 
-	if err := src.ackHandlesBatch(context.Background(), handles); err == nil {
+	if err := src.AckBatchMeta(context.Background(), metas); err == nil {
 		t.Fatalf("expected error")
 	}
 }
 
 func TestMessage_Fail_NoOpWhenConfigNil(t *testing.T) {
 	f := newFakeSQSAPI(1)
+
 	cfg := DefaultSourceSQSConfig
 	cfg.FailVisibilityTimeoutSeconds = nil
+
 	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
 
-	m := makeInternalMsg(src, "id", "rh-x")
+	m := &message{
+		src: src,
+		m: &sqstypes.Message{
+			MessageId:     aws.String("id"),
+			ReceiptHandle: aws.String("rh-x"),
+			Body:          aws.String("x"),
+		},
+	}
+
 	if err := m.Fail(context.Background(), errors.New("x")); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if f.visCalls != 0 {
 		t.Fatalf("expected visCalls=0, got %d", f.visCalls)
 	}
@@ -379,18 +403,29 @@ func TestMessage_Fail_NoOpWhenConfigNil(t *testing.T) {
 
 func TestMessage_Fail_CallsChangeVisibilityWhenConfigured(t *testing.T) {
 	f := newFakeSQSAPI(1)
+
 	cfg := DefaultSourceSQSConfig
 	to := int32(7)
 	cfg.FailVisibilityTimeoutSeconds = &to
+
 	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
 
-	m := makeInternalMsg(src, "id", "rh-777")
+	m := &message{
+		src: src,
+		m: &sqstypes.Message{
+			MessageId:     aws.String("id"),
+			ReceiptHandle: aws.String("rh-777"),
+			Body:          aws.String("x"),
+		},
+	}
+
 	if err := m.Fail(context.Background(), errors.New("x")); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if f.visCalls != 1 {
 		t.Fatalf("expected visCalls=1, got %d", f.visCalls)
 	}
@@ -399,8 +434,9 @@ func TestMessage_Fail_CallsChangeVisibilityWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestSourceSQS_Concurrent_AckAndClose_NoPanic(t *testing.T) {
+func TestSourceSQS_Concurrent_AckMetaAndClose_NoPanic(t *testing.T) {
 	f := &fakeSQSNoCapture{}
+
 	cfg := DefaultSourceSQSConfig
 	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
 
@@ -432,197 +468,10 @@ func TestSourceSQS_Concurrent_AckAndClose_NoPanic(t *testing.T) {
 
 	wg.Wait()
 
-	// basic sanity: should have made some calls
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if f.delCalls == 0 {
 		t.Fatalf("expected some delete calls")
 	}
-	_ = atomic.LoadInt64(new(int64)) // keeps atomic import used if your linter complains
-}
-
-func BenchmarkSourceSQS_AckBatch(b *testing.B) {
-	for _, n := range []int{100, 1000, 5000} {
-		b.Run(strconv.Itoa(n), func(b *testing.B) {
-			f := newFakeSQSAPI(1)
-			cfg := DefaultSourceSQSConfig
-			src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
-
-			handles := make([]ackHandle, 0, n)
-			for i := 0; i < n; i++ {
-				handles = append(handles, makeInternalMsg(src, fmt.Sprintf("id-%d", i), fmt.Sprintf("rh-%d", i)).AckHandle())
-			}
-
-			ctx := context.Background()
-
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				if err := src.ackHandlesBatch(ctx, handles); err != nil {
-					b.Fatalf("ackHandlesBatch err: %v", err)
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkSourceSQS_Receive(b *testing.B) {
-	for _, batch := range []int{1, 10} {
-		b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
-			f := newFakeSQSAPI(1024)
-			cfg := DefaultSourceSQSConfig
-			cfg.WaitTimeSeconds = 0
-			cfg.Pollers = 1
-			cfg.BufSize = 1024
-
-			src := newTestSource(context.Background(), f, "q", cfg)
-			defer src.Close()
-
-			ctx := context.Background()
-
-			payload := make([]sqstypes.Message, 0, batch)
-			for i := 0; i < batch; i++ {
-				payload = append(payload, sqstypes.Message{
-					MessageId:     aws.String("m"),
-					ReceiptHandle: aws.String("rh"),
-					Body:          aws.String("x"),
-				})
-			}
-
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				f.pushReceive(&sqs.ReceiveMessageOutput{Messages: payload})
-				for j := 0; j < batch; j++ {
-					if _, err := src.Receive(ctx); err != nil {
-						b.Fatalf("receive err: %v", err)
-					}
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkSourceSQS_Fail(b *testing.B) {
-	f := newFakeSQSAPI(1)
-	cfg := DefaultSourceSQSConfig
-	to := int32(7)
-	cfg.FailVisibilityTimeoutSeconds = &to
-
-	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
-	m := makeInternalMsg(src, "id", "rh-1")
-
-	ctx := context.Background()
-	errX := errors.New("x")
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		if err := m.Fail(ctx, errX); err != nil {
-			b.Fatalf("fail err: %v", err)
-		}
-	}
-}
-
-// --- Parallel additions ---
-
-func BenchmarkSourceSQS_ackHandlesBatch_NoCapture_Parallel(b *testing.B) {
-	for _, n := range []int{100, 1000, 5000} {
-		b.Run(strconv.Itoa(n), func(b *testing.B) {
-			f := &fakeSQSNoCapture{}
-			cfg := DefaultSourceSQSConfig
-			src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
-
-			handles := make([]ackHandle, 0, n)
-			for i := 0; i < n; i++ {
-				handles = append(handles, ackHandle{id: "id", receiptHandle: "rh"})
-			}
-
-			ctx := context.Background()
-
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			b.RunParallel(func(pb *testing.PB) {
-				for pb.Next() {
-					if err := src.ackHandlesBatch(ctx, handles); err != nil {
-						b.Fatalf("ackHandlesBatch err: %v", err)
-					}
-				}
-			})
-		})
-	}
-}
-
-func BenchmarkSourceSQS_ackMetasBatch_NoCapture_Parallel(b *testing.B) {
-	for _, n := range []int{100, 1000, 5000} {
-		b.Run(strconv.Itoa(n), func(b *testing.B) {
-			f := &fakeSQSNoCapture{}
-			cfg := DefaultSourceSQSConfig
-			src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
-
-			metas := make([]AckMetadata, 0, n)
-			for i := 0; i < n; i++ {
-				metas = append(metas, AckMetadata{ID: "id", Handle: "rh"})
-			}
-
-			ctx := context.Background()
-
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			b.RunParallel(func(pb *testing.PB) {
-				for pb.Next() {
-					if err := src.ackMetasBatch(ctx, metas); err != nil {
-						b.Fatalf("ackMetasBatch err: %v", err)
-					}
-				}
-			})
-		})
-	}
-}
-
-func BenchmarkSourceSQS_Receive_ParallelConsumers(b *testing.B) {
-	f := &fakeSQSNoCapture{}
-	cfg := DefaultSourceSQSConfig
-	cfg.BufSize = 4096
-
-	src, _ := newTestSourceNoPollers(context.Background(), f, "q", cfg)
-
-	stop := make(chan struct{})
-	defer close(stop)
-
-	// Producer: keep buffer replenished (no pollers).
-	go func() {
-		msg := &sqstypes.Message{
-			MessageId:     aws.String("m"),
-			ReceiptHandle: aws.String("rh"),
-			Body:          aws.String("x"),
-		}
-		for {
-			select {
-			case <-stop:
-				return
-			case src.bufCh <- msg:
-			default:
-				runtime.Gosched()
-			}
-		}
-	}()
-
-	ctx := context.Background()
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			if _, err := src.Receive(ctx); err != nil {
-				b.Fatalf("receive err: %v", err)
-			}
-		}
-	})
 }

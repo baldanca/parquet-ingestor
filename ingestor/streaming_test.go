@@ -13,9 +13,8 @@ import (
 )
 
 type fakeEnc[T any] struct {
-	ct  string
-	ext string
-	// counters
+	ct            string
+	ext           string
 	encodeToCalls int32
 }
 
@@ -23,7 +22,6 @@ func (e *fakeEnc[T]) ContentType() string   { return e.ct }
 func (e *fakeEnc[T]) FileExtension() string { return e.ext }
 
 func (e *fakeEnc[T]) Encode(ctx context.Context, items []T) ([]byte, error) {
-	// not used in tryStreamWrite tests
 	return []byte("x"), nil
 }
 
@@ -33,22 +31,18 @@ func (e *fakeEnc[T]) EncodeTo(ctx context.Context, items []T, w io.Writer) error
 	return err
 }
 
-// Ensure it implements both interfaces
 var _ encoder.Encoder[int] = (*fakeEnc[int])(nil)
 var _ encoder.StreamEncoder[int] = (*fakeEnc[int])(nil)
 
 type fakeSink struct {
 	writeStreamCalls int32
-	// capture
-	lastCT  string
-	lastKey string
-	buf     bytes.Buffer
-	// fail control
-	failTimes int32
+	lastCT           string
+	lastKey          string
+	buf              bytes.Buffer
+	failTimes        int32
 }
 
 func (s *fakeSink) Write(ctx context.Context, req sink.WriteRequest) error {
-	// not used here
 	return nil
 }
 
@@ -166,7 +160,6 @@ func TestTryStreamWrite_RetryIsUsed(t *testing.T) {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
-	// 2 failures + 1 success
 	if atomic.LoadInt32(&sk.writeStreamCalls) != 3 {
 		t.Fatalf("WriteStreamCalls=%d want=3", sk.writeStreamCalls)
 	}
@@ -180,7 +173,6 @@ func (benchEnc) Encode(ctx context.Context, items []int) ([]byte, error) {
 	return []byte("x"), nil
 }
 func (benchEnc) EncodeTo(ctx context.Context, items []int, w io.Writer) error {
-	// simulate some bytes
 	_, err := w.Write([]byte("parquet-bytes"))
 	return err
 }

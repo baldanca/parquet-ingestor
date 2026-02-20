@@ -91,7 +91,6 @@ func TestSimpleRetry_RespectsContextCancel(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	// should be 0 because it checks ctx.Err() before calling fn
 	if calls != 0 {
 		t.Fatalf("calls=%d want=0", calls)
 	}
@@ -121,7 +120,6 @@ func BenchmarkSimpleRetry_SuccessFirstTry(b *testing.B) {
 	}
 }
 
-// If someone changes delays to real milliseconds/seconds later, this benchmark can dominate `go test ./... -bench=...`.
 func BenchmarkSimpleRetry_FailAllAttempts(b *testing.B) {
 	if testing.Short() {
 		b.Skip("skipping in -short; retry benchmarks may sleep depending on configuration")
@@ -139,7 +137,6 @@ func BenchmarkSimpleRetry_FailAllAttempts(b *testing.B) {
 	}
 }
 
-// Measures retry overhead without timers/sleep (useful to compare changes).
 func BenchmarkSimpleRetry_FailAllAttempts_NoSleep(b *testing.B) {
 	r := SimpleRetry{Attempts: 10, BaseDelay: 0, MaxDelay: 0, Jitter: false}
 	ctx := context.Background()

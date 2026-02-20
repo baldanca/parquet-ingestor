@@ -16,7 +16,9 @@ import (
 	"github.com/baldanca/parquet-ingestor/transformer"
 )
 
-// ---- fakes ----
+//
+// Test scaffolding / fakes
+//
 
 type tMsg struct {
 	env    source.Envelope
@@ -36,21 +38,16 @@ func (m *tMsg) Fail(ctx context.Context, reason error) error {
 	m.lastFail.Store(reason)
 	return nil
 }
-
-// ✅ IMPORTANT: expose AckMeta so ack path works when batcher/acks are meta-based.
 func (m *tMsg) AckMeta() (source.AckMetadata, bool) { return m.meta, true }
 
 var _ source.Message = (*tMsg)(nil)
 
 type tSource struct {
-	// Receive
 	recvCh chan source.Message
 
-	// Ack
 	ackCalls int32
 	ackFails int32 // number of times ack should fail
 
-	// ordering check
 	writeDone atomic.Bool
 }
 
@@ -68,7 +65,6 @@ func (s *tSource) Receive(ctx context.Context) (source.Message, error) {
 }
 
 func (s *tSource) AckBatch(ctx context.Context, msgs []source.Message) error {
-	// allow fallback if ever used
 	if !s.writeDone.Load() {
 		return errors.New("ack before write")
 	}
@@ -80,7 +76,6 @@ func (s *tSource) AckBatch(ctx context.Context, msgs []source.Message) error {
 	return nil
 }
 
-// ✅ IMPORTANT: meta-based ack path (fast path). This is what AckGroup.Commit will prefer.
 func (s *tSource) AckBatchMeta(ctx context.Context, metas []source.AckMetadata) error {
 	if !s.writeDone.Load() {
 		return errors.New("ack before write")
@@ -106,7 +101,7 @@ func (t tTransformer) Transform(ctx context.Context, in source.Envelope) (int, e
 	return 7, nil
 }
 
-var _ transformer.Transformer[source.Envelope, int] = tTransformer{}
+var _ transformer.Transformer[int] = tTransformer{}
 
 type tEncoder struct {
 	ct  string
@@ -155,14 +150,12 @@ func (s *tSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) er
 		atomic.AddInt32(&s.writeFails, -1)
 		return errors.New("write stream fail")
 	}
-	// simulate streaming to destination
 	return req.Writer.WriteTo(io.Discard)
 }
 
 var _ sink.Sinkr = (*tSink)(nil)
 var _ sink.StreamSinkr = (*tSink)(nil)
 
-// Sink without streaming support.
 type tSinkOnly struct {
 	writeCalls int32
 }
@@ -174,7 +167,19 @@ func (s *tSinkOnly) Write(ctx context.Context, req sink.WriteRequest) error {
 
 var _ sink.Sinkr = (*tSinkOnly)(nil)
 
-// ---- tests ----
+//
+// Retry helpers used by tests
+//
+
+type RetryPolicyFunc func(ctx context.Context, fn func(ctx context.Context) error) error
+
+func (f RetryPolicyFunc) Do(ctx context.Context, fn func(ctx context.Context) error) error {
+	return f(ctx, fn)
+}
+
+//
+// Tests
+//
 
 func TestIngestor_processMessage_TransformerFail_CallsFail(t *testing.T) {
 	src := newTSource()
@@ -226,7 +231,6 @@ func TestIngestor_flush_UsesStreaming_WhenAvailable(t *testing.T) {
 		t.Fatalf("NewIngestor: %v", err)
 	}
 
-	// ensure ack sees "write done" only after write succeeded
 	ing.SetRetryPolicy(RetryPolicyFunc(func(ctx context.Context, fn func(ctx context.Context) error) error {
 		err := fn(ctx)
 		if err == nil {
@@ -290,6 +294,7 @@ func TestIngestor_flush_Fallback_WhenSinkNotStream(t *testing.T) {
 		}
 		return err
 	}))
+	ing.SetAckRetryPolicy(nopRetry{})
 
 	msg := &tMsg{
 		env:    source.Envelope{Payload: "x"},
@@ -319,9 +324,11 @@ func TestIngestor_flush_RetriesWriteAndAck(t *testing.T) {
 
 	src := newTSource()
 	src.ackFails = 2
+
 	tr := tTransformer{}
 	enc := &tEncoder{ct: "application/vnd.apache.parquet", ext: ".parquet"}
 	sk := &tSink{writeFails: 2}
+
 	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
 
 	ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
@@ -331,7 +338,6 @@ func TestIngestor_flush_RetriesWriteAndAck(t *testing.T) {
 
 	ing.SetAckRetryPolicy(SimpleRetry{Attempts: 5, BaseDelay: 1, MaxDelay: 1, Jitter: false})
 
-	// Wrap retry to set writeDone exactly when the write attempt succeeds.
 	ing.SetRetryPolicy(RetryPolicyFunc(func(ctx context.Context, fn func(ctx context.Context) error) error {
 		return SimpleRetry{Attempts: 5, BaseDelay: 1, MaxDelay: 1, Jitter: false}.Do(ctx, func(ctx context.Context) error {
 			err := fn(ctx)
@@ -364,15 +370,9 @@ func TestIngestor_flush_RetriesWriteAndAck(t *testing.T) {
 	}
 }
 
-// ---- small adapter ----
-
-type RetryPolicyFunc func(ctx context.Context, fn func(ctx context.Context) error) error
-
-func (f RetryPolicyFunc) Do(ctx context.Context, fn func(ctx context.Context) error) error {
-	return f(ctx, fn)
-}
-
-// ---- bench message (POINTER to avoid per-item boxing allocations) ----
+//
+// Bench fakes
+//
 
 type bMsg struct {
 	env    source.Envelope
@@ -384,33 +384,29 @@ func (m *bMsg) Data() source.Envelope                        { return m.env }
 func (m *bMsg) EstimatedSizeBytes() (int64, bool)            { return m.size, m.sizeOK }
 func (m *bMsg) Fail(ctx context.Context, reason error) error { return nil }
 
-// ---- bench source (only AckBatch is relevant for flush) ----
-
 type bSource struct{}
 
 func (bSource) Receive(ctx context.Context) (source.Message, error) { return nil, context.Canceled }
 func (bSource) AckBatch(ctx context.Context, msgs []source.Message) error {
 	return nil
 }
+func (bSource) AckBatchMeta(ctx context.Context, metas []source.AckMetadata) error {
+	return nil
+}
 
 var _ source.Sourcer = (*bSource)(nil)
-
-// ---- bench transformer ----
 
 type bTransformer struct{}
 
 func (bTransformer) Transform(ctx context.Context, in source.Envelope) (int, error) { return 1, nil }
 
-var _ transformer.Transformer[source.Envelope, int] = bTransformer{}
-
-// ---- bench encoders ----
+var _ transformer.Transformer[int] = bTransformer{}
 
 type bEncoder struct {
 	ct string
 }
 
 func (e *bEncoder) Encode(ctx context.Context, items []int) ([]byte, error) {
-	// simulate encoded payload (in-memory)
 	return make([]byte, 32*1024), nil
 }
 func (e *bEncoder) FileExtension() string { return ".bin" }
@@ -423,11 +419,9 @@ type bStreamEncoder struct {
 }
 
 func (e *bStreamEncoder) Encode(ctx context.Context, items []int) ([]byte, error) {
-	// not used in streaming path, but keep for interface completeness
 	return make([]byte, 32*1024), nil
 }
 func (e *bStreamEncoder) EncodeTo(ctx context.Context, items []int, w io.Writer) error {
-	// simulate streaming bytes
 	_, err := w.Write([]byte("stream"))
 	return err
 }
@@ -436,8 +430,6 @@ func (e *bStreamEncoder) ContentType() string   { return e.ct }
 
 var _ encoder.Encoder[int] = (*bStreamEncoder)(nil)
 var _ encoder.StreamEncoder[int] = (*bStreamEncoder)(nil)
-
-// ---- bench sinks ----
 
 type bSink struct{}
 
@@ -454,8 +446,6 @@ func (bStreamSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest)
 
 var _ sink.Sinkr = (*bStreamSink)(nil)
 var _ sink.StreamSinkr = (*bStreamSink)(nil)
-
-// ---- helpers ----
 
 func newCfg() batcher.BatcherConfig {
 	cfg := batcher.DefaultBatcherConfig
@@ -483,8 +473,6 @@ func makeMsgs(n int) []*bMsg {
 	return msgs
 }
 
-// ---- benchmarks: measure ONLY flush ----
-
 func BenchmarkIngestor_FlushOnly_Fallback(b *testing.B) {
 	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
@@ -502,10 +490,7 @@ func BenchmarkIngestor_FlushOnly_Fallback(b *testing.B) {
 				b.Fatalf("NewIngestor: %v", err)
 			}
 
-			// gera msgs “baratas” (reusáveis)
 			msgs := makeMsgs(n)
-
-			// prepara o primeiro batch fora do timer
 			fillN(ctx, ing, msgs, n)
 
 			b.ReportAllocs()
@@ -515,8 +500,6 @@ func BenchmarkIngestor_FlushOnly_Fallback(b *testing.B) {
 				if err := ing.flush(ctx); err != nil {
 					b.Fatalf("flush: %v", err)
 				}
-				// repõe para próxima iteração (fora do custo do flush)
-				// Se você quiser medir "flush + refill", tire isso de fora do timer.
 				b.StopTimer()
 				fillN(ctx, ing, msgs, n)
 				b.StartTimer()
@@ -557,5 +540,173 @@ func BenchmarkIngestor_FlushOnly_Streaming(b *testing.B) {
 				b.StartTimer()
 			}
 		})
+	}
+}
+
+//
+// Additional tests (fixed config fields)
+//
+
+func TestIngestor_flush_KeyFuncError_DoesNotAckAndReturnsError(t *testing.T) {
+	src := newTSource()
+	sk := &tSink{}
+	tr := tTransformer{}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+
+	src.writeDone.Store(true)
+
+	bcfg := batcher.BatcherConfig{
+		MaxEstimatedInputBytes: 1024,
+		FlushInterval:          10 * time.Millisecond,
+		MaxItems:               10_000,
+		ReuseBuffers:           true,
+	}
+
+	keyErr := errors.New("key func error")
+	keyFunc := func(ctx context.Context, b batcher.Batch[int]) (string, error) {
+		return "", keyErr
+	}
+
+	ig, err := NewIngestor[int](bcfg, src, tr, enc, sk, keyFunc)
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+
+	src.recvCh <- &tMsg{
+		env:    source.Envelope{Payload: []byte(`{}`)},
+		size:   1,
+		sizeOK: true,
+		meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	runErr := ig.Run(ctx, 1, 1)
+	if runErr == nil || !errors.Is(runErr, keyErr) {
+		t.Fatalf("expected key func error, got: %v", runErr)
+	}
+
+	if got := atomic.LoadInt32(&src.ackCalls); got != 0 {
+		t.Fatalf("expected no acks, got %d", got)
+	}
+}
+
+type failingStreamEncoder struct {
+	ct string
+
+	failFirst int32
+}
+
+func (e *failingStreamEncoder) Encode(ctx context.Context, items []int) ([]byte, error) {
+	return []byte("fallback"), nil
+}
+
+func (e *failingStreamEncoder) EncodeTo(ctx context.Context, items []int, w io.Writer) error {
+	if atomic.CompareAndSwapInt32(&e.failFirst, 1, 0) {
+		return errors.New("encode-to fail")
+	}
+	_, err := w.Write([]byte("ok"))
+	return err
+}
+
+func (e *failingStreamEncoder) FileExtension() string { return ".parquet" }
+func (e *failingStreamEncoder) ContentType() string   { return e.ct }
+
+var _ encoder.Encoder[int] = (*failingStreamEncoder)(nil)
+var _ encoder.StreamEncoder[int] = (*failingStreamEncoder)(nil)
+
+func TestIngestor_flush_Streaming_RetriesWhenEncodeToFails(t *testing.T) {
+	src := newTSource()
+	sk := &tSink{}
+	tr := tTransformer{}
+	enc := &failingStreamEncoder{ct: "application/octet-stream", failFirst: 1}
+
+	src.writeDone.Store(true)
+
+	bcfg := batcher.BatcherConfig{
+		MaxEstimatedInputBytes: 1, // force flush quickly by size
+		FlushInterval:          5 * time.Second,
+		MaxItems:               10_000,
+		ReuseBuffers:           true,
+	}
+
+	keyFunc := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
+
+	ig, err := NewIngestor[int](bcfg, src, tr, enc, sk, keyFunc)
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+
+	ig.SetRetryPolicy(SimpleRetry{Attempts: 3, BaseDelay: 0, MaxDelay: 0, Jitter: false})
+	ig.SetAckRetryPolicy(SimpleRetry{Attempts: 3, BaseDelay: 0, MaxDelay: 0, Jitter: false})
+
+	src.recvCh <- &tMsg{
+		env:    source.Envelope{Payload: []byte(`{}`)},
+		size:   1024,
+		sizeOK: true,
+		meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_ = ig.Run(ctx, 1, 1)
+
+	if got := atomic.LoadInt32(&sk.writeStreamCalls); got < 2 {
+		t.Fatalf("expected streaming write retried at least once, got %d", got)
+	}
+	if got := atomic.LoadInt32(&src.ackCalls); got != 1 {
+		t.Fatalf("expected exactly 1 ack, got %d", got)
+	}
+}
+
+func TestIngestor_Run_Cancel_FlushesRemainingBatch(t *testing.T) {
+	src := newTSource()
+	sk := &tSink{}
+	tr := tTransformer{}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+
+	src.writeDone.Store(true)
+
+	bcfg := batcher.BatcherConfig{
+		MaxEstimatedInputBytes: 10 * 1024 * 1024,
+		FlushInterval:          10 * time.Second, // avoid time flush
+		MaxItems:               10_000,
+		ReuseBuffers:           true,
+	}
+
+	keyFunc := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
+
+	ig, err := NewIngestor[int](bcfg, src, tr, enc, sk, keyFunc)
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+
+	ig.SetRetryPolicy(nopRetry{})
+	ig.SetAckRetryPolicy(nopRetry{})
+
+	for i := 0; i < 10; i++ {
+		src.recvCh <- &tMsg{
+			env:    source.Envelope{Payload: []byte(`{}`)},
+			size:   1,
+			sizeOK: true,
+			meta:   source.AckMetadata{ID: "id", Handle: "rh"},
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	_ = ig.Run(ctx, 2, 16)
+
+	if got := atomic.LoadInt32(&src.ackCalls); got != 1 {
+		t.Fatalf("expected exactly 1 ack on shutdown flush, got %d", got)
+	}
+	if w := atomic.LoadInt32(&sk.writeCalls) + atomic.LoadInt32(&sk.writeStreamCalls); w != 1 {
+		t.Fatalf("expected exactly 1 write on shutdown flush, got %d", w)
 	}
 }

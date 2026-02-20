@@ -7,16 +7,28 @@ import (
 	"github.com/baldanca/parquet-ingestor/source"
 )
 
+// BatcherConfig controls when buffered records are flushed.
 type BatcherConfig struct {
+	// MaxEstimatedInputBytes is the flush threshold based on the accumulated
+	// EstimatedSizeBytes of messages.
 	MaxEstimatedInputBytes int64
-	MaxItems               int
-	FlushInterval          time.Duration
-	ReuseBuffers           bool
+
+	// MaxItems is an optional flush threshold based on the number of buffered
+	// records. Use 0 to disable.
+	MaxItems int
+
+	// FlushInterval is the maximum amount of time records can remain buffered
+	// before a time-based flush happens.
+	FlushInterval time.Duration
+
+	// ReuseBuffers reuses backing arrays between flushes to reduce allocations.
+	ReuseBuffers bool
 }
 
+// DefaultBatcherConfig matches the defaults used by common streaming services.
 var DefaultBatcherConfig = BatcherConfig{
-	MaxEstimatedInputBytes: 5 * 1024 * 1024, // 5 MiB
-	MaxItems:               0,               // no limit
+	MaxEstimatedInputBytes: 5 * 1024 * 1024,
+	MaxItems:               0,
 	FlushInterval:          5 * time.Minute,
 	ReuseBuffers:           true,
 }
@@ -34,6 +46,9 @@ func (c BatcherConfig) validate() error {
 	return nil
 }
 
+// Batcher accumulates typed records and their acknowledgement handles.
+//
+// It is intentionally synchronous; concurrency lives in the ingestor.
 type Batcher[iType any] struct {
 	cfg BatcherConfig
 
@@ -51,10 +66,12 @@ type Batcher[iType any] struct {
 	active   bool
 }
 
+// NewBatcher creates a new Batcher.
 func NewBatcher[iType any](cfg BatcherConfig) (*Batcher[iType], error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
 	b := &Batcher[iType]{
 		cfg:      cfg,
 		itemsCap: 256,
@@ -70,6 +87,10 @@ func NewBatcher[iType any](cfg BatcherConfig) (*Batcher[iType], error) {
 	return b, nil
 }
 
+// Add appends an item to the active batch.
+//
+// The caller must pass the current time so Add does not perform time.Now()
+// allocations in tight loops.
 func (b *Batcher[iType]) Add(now time.Time, item iType, msg source.Message, sizeBytes int64) (flushNow bool) {
 	if !b.active {
 		b.active = true
@@ -90,10 +111,12 @@ func (b *Batcher[iType]) Add(now time.Time, item iType, msg source.Message, size
 	return b.bytes >= b.cfg.MaxEstimatedInputBytes
 }
 
+// ShouldFlushTime reports whether the current batch exceeded its time deadline.
 func (b *Batcher[iType]) ShouldFlushTime(now time.Time) bool {
 	return b.active && !now.Before(b.deadline)
 }
 
+// Deadline returns the active batch deadline, if any.
 func (b *Batcher[iType]) Deadline() (t time.Time, ok bool) {
 	if !b.active {
 		return time.Time{}, false
@@ -101,12 +124,14 @@ func (b *Batcher[iType]) Deadline() (t time.Time, ok bool) {
 	return b.deadline, true
 }
 
+// Batch is the output of Flush.
 type Batch[iType any] struct {
 	Items []iType
 	Bytes int64
 	Acks  source.AckGroup
 }
 
+// Flush returns the current batch and resets the buffer.
 func (b *Batcher[iType]) Flush() Batch[iType] {
 	out := Batch[iType]{
 		Items: b.items,
@@ -142,7 +167,13 @@ func (b *Batcher[iType]) updateTargetCap(bytes int64, n int) {
 		return
 	}
 
-	maxItems := b.cfg.MaxEstimatedInputBytes / (bytes / int64(n))
+	avg := bytes / int64(n)
+	if avg <= 0 {
+		b.targetCap = b.itemsCap
+		return
+	}
+
+	maxItems := b.cfg.MaxEstimatedInputBytes / avg
 	ideal := int(maxItems)
 
 	if ideal < b.itemsCap {

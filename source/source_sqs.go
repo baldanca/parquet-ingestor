@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,6 +15,25 @@ import (
 // ErrClosed is returned when Receive is called after the source has been closed.
 var ErrClosed = errors.New("source closed")
 
+// sqsBatchIDPtrs provides stable pointers for DeleteMessageBatch/ChangeMessageVisibilityBatch Entry IDs.
+// SQS only requires IDs to be unique within the request; they do not need to match MessageId.
+var (
+	sqsBatchIDStrings = [10]string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
+	sqsBatchIDPtrs    = [10]*string{
+		&sqsBatchIDStrings[0],
+		&sqsBatchIDStrings[1],
+		&sqsBatchIDStrings[2],
+		&sqsBatchIDStrings[3],
+		&sqsBatchIDStrings[4],
+		&sqsBatchIDStrings[5],
+		&sqsBatchIDStrings[6],
+		&sqsBatchIDStrings[7],
+		&sqsBatchIDStrings[8],
+		&sqsBatchIDStrings[9],
+	}
+)
+
+// SourceSQSConfig controls the SQS polling behavior.
 type SourceSQSConfig struct {
 	WaitTimeSeconds int32
 	MaxMessages     int32
@@ -48,6 +66,7 @@ func (c *SourceSQSConfig) validate() {
 	}
 }
 
+// DefaultSourceSQSConfig provides sensible defaults for long polling.
 var DefaultSourceSQSConfig = SourceSQSConfig{
 	WaitTimeSeconds: 20,
 	MaxMessages:     10,
@@ -63,6 +82,9 @@ type sqsAPI interface {
 	ChangeMessageVisibilityBatch(ctx context.Context, params *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error)
 }
 
+// SourceSQS is an Amazon SQS source with internal long-polling workers.
+//
+// Close cancels pollers and will eventually make Receive return ErrClosed.
 type SourceSQS struct {
 	cfg SourceSQSConfig
 
@@ -78,7 +100,8 @@ type SourceSQS struct {
 	wg sync.WaitGroup
 }
 
-func NewWithConfig(ctx context.Context, client sqsAPI, queueURL string, cfg SourceSQSConfig) *SourceSQS {
+// NewSourceSQSWithConfig creates a SourceSQS.
+func NewSourceSQSWithConfig(ctx context.Context, client sqsAPI, queueURL string, cfg SourceSQSConfig) *SourceSQS {
 	if client == nil {
 		panic("sqs client is required")
 	}
@@ -100,6 +123,11 @@ func NewWithConfig(ctx context.Context, client sqsAPI, queueURL string, cfg Sour
 
 	s.startPollers(ctx)
 	return s
+}
+
+// NewSourceSQS creates a SourceSQS using DefaultSourceSQSConfig.
+func NewSourceSQS(ctx context.Context, client sqsAPI, queueURL string) *SourceSQS {
+	return NewSourceSQSWithConfig(ctx, client, queueURL, DefaultSourceSQSConfig)
 }
 
 func (s *SourceSQS) startPollers(ctx context.Context) {
@@ -155,6 +183,7 @@ func (s *SourceSQS) pollLoop(ctx context.Context) {
 	}
 }
 
+// Close stops polling.
 func (s *SourceSQS) Close() {
 	s.closeOnce.Do(func() {
 		s.cancel()
@@ -177,15 +206,15 @@ type ackable interface {
 	AckHandle() ackHandle
 }
 
+// AckBatch deletes messages from SQS in batches of up to 10.
+// It tries a fast-path for internal *message values to avoid allocations.
 func (s *SourceSQS) AckBatch(ctx context.Context, msgs []Message) error {
 	if len(msgs) == 0 {
 		return nil
 	}
 
-	// Avoid building an intermediate slice of handles: build DeleteMessageBatch entries directly.
-	// This significantly reduces allocations on hot acknowledgement paths.
 	const max = 10
-	entries := make([]sqstypes.DeleteMessageBatchRequestEntry, 0, max)
+	entries := make([]sqstypes.DeleteMessageBatchRequestEntry, max)
 	in := sqs.DeleteMessageBatchInput{QueueUrl: s.queueURLPtr}
 
 	for i := 0; i < len(msgs); i += max {
@@ -194,92 +223,61 @@ func (s *SourceSQS) AckBatch(ctx context.Context, msgs []Message) error {
 			end = len(msgs)
 		}
 
-		entries = entries[:0]
-		var ids [max]string
-		var rhs [max]string
-
+		n := 0
 		for j := i; j < end; j++ {
 			m := msgs[j]
 			if m == nil {
 				continue
 			}
+
+			entries[n].Id = sqsBatchIDPtrs[n]
+
+			// Fast path: internal message already has pointers compatible with AWS SDK.
+			if im, ok := m.(*message); ok && im != nil && im.m != nil && im.m.ReceiptHandle != nil {
+				entries[n].ReceiptHandle = im.m.ReceiptHandle
+				n++
+				continue
+			}
+
+			// Fallback: interface-based ack handle (may allocate depending on implementation).
 			am, ok := m.(ackable)
 			if !ok {
 				return fmt.Errorf("message does not support AckHandle(): %T", m)
 			}
 			h := am.AckHandle()
-			k := len(entries)
-			ids[k] = h.id
-			rhs[k] = h.receiptHandle
-			entries = append(entries, sqstypes.DeleteMessageBatchRequestEntry{Id: &ids[k], ReceiptHandle: &rhs[k]})
+			rh := h.receiptHandle
+			entries[n].ReceiptHandle = &rh // escapes for non-internal messages
+			n++
 		}
 
-		if len(entries) == 0 {
+		if n == 0 {
 			continue
 		}
 
-		in.Entries = entries
+		in.Entries = entries[:n]
 		out, err := s.client.DeleteMessageBatch(ctx, &in)
 		if err != nil {
 			return err
 		}
 		if len(out.Failed) > 0 {
 			f := out.Failed[0]
-			return fmt.Errorf("sqs delete failed id=%s code=%s message=%s",
-				aws.ToString(f.Id), aws.ToString(f.Code), aws.ToString(f.Message))
+			code, msg := aws.ToString(f.Code), aws.ToString(f.Message)
+			return fmt.Errorf("delete message batch failed: code=%s message=%s", code, msg)
 		}
 	}
+
 	return nil
 }
 
-func (s *SourceSQS) ackHandlesBatch(ctx context.Context, handles []ackHandle) error {
-	const max = 10
-
-	entries := make([]sqstypes.DeleteMessageBatchRequestEntry, 0, max)
-	in := sqs.DeleteMessageBatchInput{QueueUrl: s.queueURLPtr}
-
-	for i := 0; i < len(handles); i += max {
-		end := i + max
-		if end > len(handles) {
-			end = len(handles)
-		}
-
-		entries = entries[:0]
-		for j := i; j < end; j++ {
-			// ponteiro direto pros campos do slice
-			entries = append(entries, sqstypes.DeleteMessageBatchRequestEntry{
-				Id:            &handles[j].id,
-				ReceiptHandle: &handles[j].receiptHandle,
-			})
-		}
-
-		in.Entries = entries
-		out, err := s.client.DeleteMessageBatch(ctx, &in)
-		if err != nil {
-			return err
-		}
-		if len(out.Failed) > 0 {
-			f := out.Failed[0]
-			return fmt.Errorf("sqs delete failed id=%s code=%s message=%s",
-				aws.ToString(f.Id), aws.ToString(f.Code), aws.ToString(f.Message))
-		}
-	}
-	return nil
-}
-
-// AckBatchMeta is an optional, source-agnostic fast path used by AckGroup when
-// available. It acknowledges messages using AckMetadata (ID/Handle).
+// AckBatchMeta deletes messages from SQS in batches of up to 10 using AckMetadata.
+// It uses stable Entry IDs and takes ReceiptHandle pointers directly from the metas slice to avoid per-entry heap allocations.
 func (s *SourceSQS) AckBatchMeta(ctx context.Context, metas []AckMetadata) error {
 	if len(metas) == 0 {
 		return nil
 	}
-	return s.ackMetasBatch(ctx, metas)
-}
 
-func (s *SourceSQS) ackMetasBatch(ctx context.Context, metas []AckMetadata) error {
 	const max = 10
-
-	entries := make([]sqstypes.DeleteMessageBatchRequestEntry, 0, max)
+	entries := make([]sqstypes.DeleteMessageBatchRequestEntry, max)
 	in := sqs.DeleteMessageBatchInput{QueueUrl: s.queueURLPtr}
 
 	for i := 0; i < len(metas); i += max {
@@ -288,31 +286,85 @@ func (s *SourceSQS) ackMetasBatch(ctx context.Context, metas []AckMetadata) erro
 			end = len(metas)
 		}
 
-		entries = entries[:0]
+		n := 0
 		for j := i; j < end; j++ {
-			entries = append(entries, sqstypes.DeleteMessageBatchRequestEntry{
-				Id:            &metas[j].ID,
-				ReceiptHandle: &metas[j].Handle,
-			})
+			rh := &metas[j].Handle
+			if *rh == "" {
+				continue
+			}
+			entries[n].Id = sqsBatchIDPtrs[n]
+			entries[n].ReceiptHandle = rh
+			n++
 		}
 
-		in.Entries = entries
+		if n == 0 {
+			continue
+		}
+
+		in.Entries = entries[:n]
 		out, err := s.client.DeleteMessageBatch(ctx, &in)
 		if err != nil {
 			return err
 		}
 		if len(out.Failed) > 0 {
 			f := out.Failed[0]
-			return fmt.Errorf("sqs delete failed id=%s code=%s message=%s",
-				aws.ToString(f.Id), aws.ToString(f.Code), aws.ToString(f.Message))
+			code, msg := aws.ToString(f.Code), aws.ToString(f.Message)
+			return fmt.Errorf("delete message batch failed: code=%s message=%s", code, msg)
 		}
 	}
+
 	return nil
 }
 
-type ackHandle struct {
-	id            string
-	receiptHandle string
+// ExtendVisibilityBatch extends the visibility timeout for a batch of messages.
+// The request is sent in chunks of up to 10 entries.
+func (s *SourceSQS) ExtendVisibilityBatch(ctx context.Context, metas []AckMetadata, timeoutSeconds int32) error {
+	if len(metas) == 0 {
+		return nil
+	}
+	if timeoutSeconds < 0 {
+		return fmt.Errorf("timeoutSeconds must be non-negative")
+	}
+
+	const max = 10
+	entries := make([]sqstypes.ChangeMessageVisibilityBatchRequestEntry, max)
+	in := sqs.ChangeMessageVisibilityBatchInput{QueueUrl: s.queueURLPtr}
+
+	for i := 0; i < len(metas); i += max {
+		end := i + max
+		if end > len(metas) {
+			end = len(metas)
+		}
+
+		n := 0
+		for j := i; j < end; j++ {
+			rh := &metas[j].Handle
+			if *rh == "" {
+				continue
+			}
+			entries[n].Id = sqsBatchIDPtrs[n]
+			entries[n].ReceiptHandle = rh
+			entries[n].VisibilityTimeout = timeoutSeconds
+			n++
+		}
+
+		if n == 0 {
+			continue
+		}
+
+		in.Entries = entries[:n]
+		out, err := s.client.ChangeMessageVisibilityBatch(ctx, &in)
+		if err != nil {
+			return err
+		}
+		if len(out.Failed) > 0 {
+			f := out.Failed[0]
+			code, msg := aws.ToString(f.Code), aws.ToString(f.Message)
+			return fmt.Errorf("change visibility batch failed: code=%s message=%s", code, msg)
+		}
+	}
+
+	return nil
 }
 
 type message struct {
@@ -324,100 +376,47 @@ func (m *message) Data() Envelope {
 	return Envelope{Payload: aws.ToString(m.m.Body)}
 }
 
-func (m *message) AckHandle() ackHandle {
-	id := ""
-	if m.m.MessageId != nil {
-		id = *m.m.MessageId
-	}
-	if id == "" {
-		id = strconv.FormatInt(time.Now().UnixNano(), 10)
-	}
-	return ackHandle{
-		id:            id,
-		receiptHandle: aws.ToString(m.m.ReceiptHandle),
-	}
-}
-
-func (m *message) AckMeta() (AckMetadata, bool) {
-	id := ""
-	if m.m.MessageId != nil {
-		id = *m.m.MessageId
-	}
-	if id == "" {
-		id = strconv.FormatInt(time.Now().UnixNano(), 10)
-	}
-	rh := aws.ToString(m.m.ReceiptHandle)
-	if rh == "" {
-		return AckMetadata{}, false
-	}
-	return AckMetadata{ID: id, Handle: rh}, true
-}
-
 func (m *message) EstimatedSizeBytes() (int64, bool) {
-	body := aws.ToString(m.m.Body)
-	return int64(len(body)), true
+	return int64(len(aws.ToString(m.m.Body))), true
 }
 
-func (m *message) Fail(ctx context.Context, err error) error {
+func (m *message) Fail(ctx context.Context, reason error) error {
 	if m.src.cfg.FailVisibilityTimeoutSeconds == nil {
 		return nil
 	}
-	_, callErr := m.src.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+	_, err := m.src.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          m.src.queueURLPtr,
 		ReceiptHandle:     m.m.ReceiptHandle,
 		VisibilityTimeout: *m.src.cfg.FailVisibilityTimeoutSeconds,
 	})
-	if callErr != nil && !errors.Is(callErr, context.Canceled) && !errors.Is(callErr, context.DeadlineExceeded) {
-		return callErr
-	}
-	return nil
+	return err
 }
 
-func (s *SourceSQS) ExtendVisibilityBatch(ctx context.Context, metas []AckMetadata, visibilityTimeoutSeconds int32) error {
-	if len(metas) == 0 {
-		return nil
+type ackHandle struct {
+	id            string
+	receiptHandle string
+}
+
+// Improvement #3: avoid aws.ToString in hot-path extraction (no helper call, no extra work).
+func (m *message) AckHandle() ackHandle {
+	var id, rh string
+	if m.m.MessageId != nil {
+		id = *m.m.MessageId
 	}
-
-	const max = 10
-	in := sqs.ChangeMessageVisibilityBatchInput{
-		QueueUrl: s.queueURLPtr,
+	if m.m.ReceiptHandle != nil {
+		rh = *m.m.ReceiptHandle
 	}
+	return ackHandle{id: id, receiptHandle: rh}
+}
 
-	entries := make([]sqstypes.ChangeMessageVisibilityBatchRequestEntry, 0, max)
-
-	for i := 0; i < len(metas); i += max {
-		end := i + max
-		if end > len(metas) {
-			end = len(metas)
-		}
-
-		entries = entries[:0]
-		var ids [max]string
-		var rhs [max]string
-
-		for j := i; j < end; j++ {
-			k := j - i
-			ids[k] = metas[j].ID
-			rhs[k] = metas[j].Handle
-
-			entries = append(entries, sqstypes.ChangeMessageVisibilityBatchRequestEntry{
-				Id:                &ids[k],
-				ReceiptHandle:     &rhs[k],
-				VisibilityTimeout: visibilityTimeoutSeconds,
-			})
-		}
-
-		in.Entries = entries
-		out, err := s.client.ChangeMessageVisibilityBatch(ctx, &in)
-		if err != nil {
-			return err
-		}
-		if len(out.Failed) > 0 {
-			f := out.Failed[0]
-			return fmt.Errorf("sqs visibility batch failed id=%s code=%s message=%s",
-				aws.ToString(f.Id), aws.ToString(f.Code), aws.ToString(f.Message))
-		}
+// Improvement #3: same here (still returns strings, but avoids aws.ToString calls).
+func (m *message) AckMeta() (AckMetadata, bool) {
+	var id, rh string
+	if m.m.MessageId != nil {
+		id = *m.m.MessageId
 	}
-
-	return nil
+	if m.m.ReceiptHandle != nil {
+		rh = *m.m.ReceiptHandle
+	}
+	return AckMetadata{ID: id, Handle: rh}, true
 }

@@ -15,7 +15,10 @@ type s3API interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 }
 
-type Sink struct {
+// S3Sink uploads objects to Amazon S3.
+//
+// It supports both buffered (Write) and streaming (WriteStream) uploads.
+type S3Sink struct {
 	client s3API
 
 	bucket    string
@@ -25,7 +28,13 @@ type Sink struct {
 	pool sync.Pool
 }
 
-func New(client s3API, bucket, prefix string) *Sink {
+// Sink is kept for backward compatibility.
+type Sink = S3Sink
+
+// NewSinkS3 creates an S3 sink that uploads to the given bucket and optional prefix.
+//
+// Prefix is joined with the request key using a single '/' separator.
+func NewSinkS3(client s3API, bucket, prefix string) *S3Sink {
 	if client == nil {
 		panic("s3 client is required")
 	}
@@ -33,40 +42,27 @@ func New(client s3API, bucket, prefix string) *Sink {
 		panic("bucket is required")
 	}
 
-	s := &Sink{
+	s := &S3Sink{
 		client: client,
 		bucket: bucket,
 		prefix: strings.Trim(prefix, "/"),
 	}
-	// Ponteiro estável.
 	s.bucketPtr = &s.bucket
 
-	// Scratch objects para evitar allocs por Write devido a “address-of-local escape”.
 	s.pool.New = func() any { return new(putScratch) }
 	return s
 }
 
-func (s *Sink) Write(ctx context.Context, req WriteRequest) error {
+func (s *S3Sink) Write(ctx context.Context, req WriteRequest) error {
 	if req.Key == "" {
-		return fmt.Errorf("empty key")
+		return fmt.Errorf("key is empty")
 	}
 
-	// Use pooled scratch to avoid per-call heap allocations from escaping locals.
 	sc := s.pool.Get().(*putScratch)
 	defer s.pool.Put(sc)
 
-	// Build key sem path-clean.
 	key := trimLeftSlashes(req.Key)
-	if s.prefix != "" {
-		sc.b.Reset()
-		sc.b.Grow(len(s.prefix) + 1 + len(key))
-		sc.b.WriteString(s.prefix)
-		sc.b.WriteByte('/')
-		sc.b.WriteString(key)
-		sc.key = sc.b.String()
-	} else {
-		sc.key = key
-	}
+	sc.key = joinPrefix(s.prefix, key, &sc.sb)
 
 	sc.cl = int64(len(req.Data))
 
@@ -92,32 +88,19 @@ func (s *Sink) Write(ctx context.Context, req WriteRequest) error {
 	return nil
 }
 
-// WriteStream streams the object body directly to S3 without buffering the full payload in memory.
-// ContentLength is not set; the AWS SDK will stream the body as it is produced.
-func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
+func (s *S3Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	if req.Key == "" {
-		return fmt.Errorf("empty key")
+		return fmt.Errorf("key is empty")
 	}
 	if req.Writer == nil {
-		return fmt.Errorf("nil writer")
+		return fmt.Errorf("writer is nil")
 	}
 
-	// Use pooled scratch to avoid per-call heap allocations from escaping locals.
 	sc := s.pool.Get().(*putScratch)
 	defer s.pool.Put(sc)
 
-	// Build key sem path-clean.
 	key := trimLeftSlashes(req.Key)
-	if s.prefix != "" {
-		sc.sb.Reset()
-		sc.sb.Grow(len(s.prefix) + 1 + len(key))
-		sc.sb.WriteString(s.prefix)
-		sc.sb.WriteByte('/')
-		sc.sb.WriteString(key)
-		sc.key = sc.sb.String()
-	} else {
-		sc.key = key
-	}
+	sc.key = joinPrefix(s.prefix, key, &sc.sb)
 
 	if req.ContentType != "" {
 		sc.ct = req.ContentType
@@ -128,14 +111,12 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	}
 
 	pr, pw := io.Pipe()
-	// If PutObject returns early (ctx cancel / network error), close reader to unblock writer.
 	defer pr.Close()
 
 	var (
 		wg   sync.WaitGroup
 		werr error
 	)
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -147,7 +128,6 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 	sc.in.Bucket = s.bucketPtr
 	sc.in.Key = &sc.key
 	sc.in.Body = pr
-	// Unknown length for streaming.
 	sc.in.ContentLength = nil
 
 	_, err := s.client.PutObject(ctx, &sc.in)
@@ -157,10 +137,9 @@ func (s *Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error {
 		return fmt.Errorf("put s3 object key=%q: %w", key, err)
 	}
 
-	// Ensure producer finished (and surface producer errors even if S3 accepted fast).
 	wg.Wait()
 	if werr != nil {
-		return fmt.Errorf("stream write key=%q: %w", key, werr)
+		return fmt.Errorf("stream producer error key=%q: %w", key, werr)
 	}
 	return nil
 }
@@ -171,8 +150,19 @@ type putScratch struct {
 	ct   string
 	cl   int64
 	body bytes.Reader
-	b    strings.Builder
 	sb   strings.Builder
+}
+
+func joinPrefix(prefix, key string, b *strings.Builder) string {
+	if prefix == "" {
+		return key
+	}
+	b.Reset()
+	b.Grow(len(prefix) + 1 + len(key))
+	b.WriteString(prefix)
+	b.WriteByte('/')
+	b.WriteString(key)
+	return b.String()
 }
 
 func trimLeftSlashes(s string) string {

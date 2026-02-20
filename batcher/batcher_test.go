@@ -7,8 +7,6 @@ import (
 	"github.com/baldanca/parquet-ingestor/source"
 )
 
-// helper: build a minimal message without assuming fields.
-// If source.Message is a struct with required fields, adjust here only.
 func testMsg() source.Message {
 	var m source.Message
 	return m
@@ -51,7 +49,6 @@ func TestNewBatcher_ReusesBuffersWhenEnabled(t *testing.T) {
 	if b.items == nil || b.spareItems == nil {
 		t.Fatalf("expected items/spareItems allocated when ReuseBuffers=true")
 	}
-	// AckGroup is a struct; just ensure it's initialized (zero value ok).
 }
 
 func TestNewBatcher_DoesNotAllocateWhenReuseDisabled(t *testing.T) {
@@ -194,7 +191,6 @@ func TestBatcher_Flush_ResetsStateAndReturnsBatch(t *testing.T) {
 	if out.Bytes != 10 {
 		t.Fatalf("bytes=%d want 10", out.Bytes)
 	}
-	// We don't assert AckGroup internals (depends on source package).
 
 	if b.active {
 		t.Fatalf("expected inactive after flush")
@@ -215,29 +211,23 @@ func TestBatcher_Flush_ReusesBuffers(t *testing.T) {
 	b, _ := NewBatcher[int](cfg)
 	now := time.Unix(0, 0)
 
-	// Fill enough to grow underlying slice to ensure we can observe reuse.
 	for i := 0; i < 1000; i++ {
 		_ = b.Add(now, i, testMsg(), 100)
 	}
 
-	// Capture backing arrays.
 	origItemsPtr := &b.items[:cap(b.items)][0] // safe because cap>0 with reuse enabled
 
 	out := b.Flush()
 
-	// After Flush with reuse, b.items should now point to spare slice, not out.Items.
-	// But on next adds, it should reuse spare capacity (not nil allocate).
 	_ = b.Add(now, 1, testMsg(), 1)
 	if cap(b.items) == 0 {
 		t.Fatalf("expected reused capacity after flush")
 	}
 
-	// Also ensure previous out.Items slice still contains values.
 	if len(out.Items) == 0 {
 		t.Fatalf("expected out.Items not empty")
 	}
 
-	// This check isn't strict, but helps detect accidental full realloc/reset.
 	_ = origItemsPtr
 }
 
@@ -310,7 +300,6 @@ func BenchmarkBatcher_Flush_ReuseBuffers(b *testing.B) {
 	now := time.Unix(0, 0)
 	msg := benchMsg()
 
-	// Prepare a typical batch size.
 	for i := 0; i < 10_000; i++ {
 		_ = bt.Add(now, i, msg, 64)
 	}
@@ -320,7 +309,6 @@ func BenchmarkBatcher_Flush_ReuseBuffers(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		_ = bt.Flush()
-		// refill for next iteration
 		for j := 0; j < 10_000; j++ {
 			_ = bt.Add(now, j, msg, 64)
 		}

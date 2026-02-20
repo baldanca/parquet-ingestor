@@ -18,7 +18,6 @@ import (
 	"github.com/baldanca/parquet-ingestor/source"
 )
 
-// Integration test types (mirrors encoder unit test struct tags).
 type testItem struct {
 	ID    int64   `parquet:"name=id"`
 	Name  string  `parquet:"name=name"`
@@ -39,8 +38,7 @@ func (m *memMsg) Fail(ctx context.Context, reason error) error { m.failed.Store(
 func (m *memMsg) AckMeta() (source.AckMetadata, bool)          { return m.meta, true } // fast-path for AckGroup
 
 type memSource struct {
-	ch chan source.Message
-	// counts both AckBatch and AckBatchMeta
+	ch    chan source.Message
 	acked atomic.Int64
 }
 
@@ -54,7 +52,6 @@ func (s *memSource) Receive(ctx context.Context) (source.Message, error) {
 		return nil, ctx.Err()
 	case m := <-s.ch:
 		if m == nil {
-			// Nil sentinel => behave like a graceful stop.
 			return nil, context.Canceled
 		}
 		return m, nil
@@ -66,7 +63,6 @@ func (s *memSource) AckBatch(ctx context.Context, msgs []source.Message) error {
 	return nil
 }
 
-// AckBatchMeta is the fast-path used by source.AckGroup when available.
 func (s *memSource) AckBatchMeta(ctx context.Context, metas []source.AckMetadata) error {
 	s.acked.Add(int64(len(metas)))
 	return nil
@@ -108,7 +104,6 @@ func (s *memSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) 
 	return nil
 }
 
-// noStreamSink forces fallback path by *not* implementing WriteStream.
 type noStreamSink struct {
 	mu     sync.Mutex
 	writes int
@@ -166,7 +161,6 @@ func TestIntegration_Ingestor_Streaming_EndToEnd(t *testing.T) {
 
 	enc := encoder.ParquetEncoder[testItem]{Compression: "snappy"}
 
-	// Deterministic: flush by MaxItems.
 	const total = 500
 	cfg := batcher.BatcherConfig{
 		MaxEstimatedInputBytes: 256 * 1024,
@@ -187,7 +181,6 @@ func TestIntegration_Ingestor_Streaming_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Produce messages.
 	for i := 0; i < total; i++ {
 		it := testItem{ID: int64(i), Name: "x", Value: float64(i)}
 		b, _ := json.Marshal(it)
@@ -197,19 +190,15 @@ func TestIntegration_Ingestor_Streaming_EndToEnd(t *testing.T) {
 			meta: source.AckMetadata{ID: "id", Handle: "rh"},
 		}
 	}
-	// ✅ sentinel to stop Receive() deterministically
 	src.ch <- nil
 
 	done := make(chan error, 1)
 	go func() {
-		// flushWorkers=2, queue=4
 		done <- ing.Run(ctx, 2, 4)
 	}()
 
-	// Wait for all acks (means: flush happened + commit succeeded).
 	waitForAcks(t, src, int64(total), 3*time.Second)
 
-	// Stop the ingestor.
 	cancel()
 
 	runErr := <-done
@@ -233,7 +222,6 @@ func TestIntegration_Ingestor_Fallback_EncodeThenWrite(t *testing.T) {
 
 	enc := encoder.ParquetEncoder[testItem]{Compression: ""}
 
-	// Force multiple fallback writes by MaxItems.
 	const total = 250
 	cfg := batcher.BatcherConfig{
 		MaxEstimatedInputBytes: 32 * 1024,
@@ -263,16 +251,13 @@ func TestIntegration_Ingestor_Fallback_EncodeThenWrite(t *testing.T) {
 			meta: source.AckMetadata{ID: "id", Handle: "rh"},
 		}
 	}
-	// ✅ sentinel to stop Receive() deterministically
 	src.ch <- nil
 
 	done := make(chan error, 1)
 	go func() { done <- ing.Run(ctx, 2, 4) }()
 
-	// ✅ Wait until ALL messages are acked (no timing assumptions).
 	waitForAcks(t, src, int64(total), 3*time.Second)
 
-	// Stop the ingestor.
 	cancel()
 
 	runErr := <-done
@@ -290,10 +275,77 @@ func TestIntegration_Ingestor_Fallback_EncodeThenWrite(t *testing.T) {
 		t.Fatalf("expected >=2 writes and bytes > 0, got writes=%d bytes=%d", snk.writes, snk.bytes)
 	}
 
-	// Sanity: parquet magic bytes "PAR1".
 	var payload bytes.Buffer
 	_ = enc.EncodeTo(context.Background(), []testItem{{ID: 1, Name: "z", Value: 1}}, &payload)
 	if b := payload.Bytes(); len(b) < 4 || string(b[:4]) != "PAR1" {
 		t.Fatalf("expected parquet magic header PAR1, got %q", b[:4])
+	}
+}
+
+type failingMemSink struct {
+	failLeft atomic.Int32
+	writes   atomic.Int32
+}
+
+func (s *failingMemSink) Write(ctx context.Context, req sink.WriteRequest) error {
+	s.writes.Add(1)
+	if s.failLeft.Load() > 0 {
+		s.failLeft.Add(-1)
+		return errors.New("temporary sink error")
+	}
+	return nil
+}
+
+// Compatível com o estado atual do repo:
+// - não depende de transformer
+// - não depende de retry API inexistente
+// - ainda valida um contrato importante: "ack só depois de write OK"
+func TestIntegration_Ingestor_DoesNotAckIfSinkFails(t *testing.T) {
+	src := newMemSource(1024)
+
+	// Faz o sink falhar durante todo o teste
+	sk := &failingMemSink{}
+	sk.failLeft.Store(1_000_000)
+
+	enc := encoder.NewParquetEncoder[testItem](encoder.ParquetCompressionSnappy)
+
+	bcfg := batcher.BatcherConfig{
+		MaxEstimatedInputBytes: 1024,
+		FlushInterval:          50 * time.Millisecond,
+		MaxItems:               10_000,
+		ReuseBuffers:           true,
+	}
+
+	keyFunc := func(ctx context.Context, b batcher.Batch[testItem]) (string, error) { return "k", nil }
+
+	ig, err := ingestor.NewIngestor[testItem](bcfg, src, jsonTransformer{}, enc, sk, keyFunc)
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+
+	// Push algumas mensagens e sinaliza fim
+	for i := 0; i < 10; i++ {
+		payload, _ := json.Marshal(testItem{ID: int64(i), Name: "n", Value: 1.0})
+		src.ch <- &memMsg{
+			env:  source.Envelope{Payload: payload},
+			size: int64(len(payload)),
+			meta: source.AckMetadata{Handle: "rh"},
+		}
+	}
+	src.ch <- nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	_ = ig.Run(ctx, 1, 1)
+
+	// Se o contrato é ack somente após write OK, então com sink falhando:
+	if got := src.acked.Load(); got != 0 {
+		t.Fatalf("expected 0 acked when sink keeps failing, got %d", got)
+	}
+
+	// E o sink precisa ter sido tentado pelo menos 1 vez.
+	if got := sk.writes.Load(); got == 0 {
+		t.Fatalf("expected sink to be attempted at least once, got %d", got)
 	}
 }

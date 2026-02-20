@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// RetryPolicy wraps an operation with retries.
 type RetryPolicy interface {
 	Do(ctx context.Context, fn func(ctx context.Context) error) error
 }
@@ -19,13 +20,15 @@ func (nopRetry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 	return fn(ctx)
 }
 
-// SimpleRetry is a small, dependency-free retry policy with exponential backoff.
-// It retries on ANY error returned by fn (you can wrap fn to filter errors if desired).
+// SimpleRetry retries an operation using exponential backoff.
+//
+// It retries on any error returned by fn. If you need conditional retries,
+// wrap fn and decide which errors to return.
 type SimpleRetry struct {
-	Attempts  int           // total attempts (>=1). Example: 3 means 1 try + 2 retries.
-	BaseDelay time.Duration // initial delay, e.g. 50ms
-	MaxDelay  time.Duration // cap delay, e.g. 2s
-	Jitter    bool          // add +/- 20% jitter
+	Attempts  int
+	BaseDelay time.Duration
+	MaxDelay  time.Duration
+	Jitter    bool
 }
 
 func (r SimpleRetry) Do(ctx context.Context, fn func(ctx context.Context) error) error {
@@ -38,9 +41,6 @@ func (r SimpleRetry) Do(ctx context.Context, fn func(ctx context.Context) error)
 		attempts = 1
 	}
 
-	// Fast-path: no sleep/timers.
-	// Useful for "immediate retries" (and makes benches sane on Windows).
-	// Triggered when BOTH BaseDelay and MaxDelay are <= 0 (explicit opt-in).
 	if r.BaseDelay <= 0 && r.MaxDelay <= 0 {
 		var last error
 		for i := 0; i < attempts; i++ {
@@ -81,14 +81,12 @@ func (r SimpleRetry) Do(ctx context.Context, fn func(ctx context.Context) error)
 			last = err
 		}
 
-		// no sleep after last attempt
 		if i == attempts-1 {
 			break
 		}
 
 		d := delay
 		if r.Jitter {
-			// +/- 20%
 			j := 0.8 + rand.Float64()*0.4
 			d = time.Duration(float64(d) * j)
 		}
@@ -104,7 +102,6 @@ func (r SimpleRetry) Do(ctx context.Context, fn func(ctx context.Context) error)
 		case <-timer.C:
 		}
 
-		// exponential backoff
 		delay *= 2
 		if delay > max {
 			delay = max
