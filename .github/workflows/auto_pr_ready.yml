@@ -1,0 +1,48 @@
+name: Auto PR → Ready for Review (after CI green)
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  ready:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Mark related draft PR ready (feature → develop)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Only feature branches
+          if [[ "$HEAD_BRANCH" != feat/* && "$HEAD_BRANCH" != feature/* ]]; then
+            echo "Head branch $HEAD_BRANCH is not feat/* or feature/*. Skipping."
+            exit 0
+          fi
+
+          # Find open PR for this branch into develop
+          pr_number=$(gh pr list             --repo "$REPO"             --state open             --base develop             --head "$HEAD_BRANCH"             --json number,isDraft             --jq '.[0].number // empty')
+
+          if [[ -z "${pr_number:-}" ]]; then
+            echo "No open PR found for $HEAD_BRANCH → develop. Skipping."
+            exit 0
+          fi
+
+          is_draft=$(gh pr view "$pr_number" --repo "$REPO" --json isDraft --jq '.isDraft')
+          if [[ "$is_draft" != "true" ]]; then
+            echo "PR #$pr_number is already ready for review."
+            exit 0
+          fi
+
+          echo "Marking PR #$pr_number as ready for review (CI green)."
+          gh pr ready "$pr_number" --repo "$REPO"
