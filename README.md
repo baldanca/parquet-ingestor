@@ -1,4 +1,4 @@
-# 👑 Parquet Ingestor — GOD EMPEROR EDITION
+# Parquet Ingestor
 
 High-performance ETL pipeline for batching, transforming, and delivering data to **S3 as Parquet**.
 
@@ -24,7 +24,7 @@ High-performance ETL pipeline for batching, transforming, and delivering data to
 
 Use this when you need:
 
-- **batching** by **size** *or* **time**
+- **batching** by **size** _or_ **time**
 - **custom transforms** (JSON → struct, protobuf → struct, etc.)
 - **Parquet** output for **Athena / Spark / Trino / Data Mesh**
 - **autoscaling workers**
@@ -84,29 +84,6 @@ Parquet Ingestor is designed to be:
 - **Autoscaling workers**
 - **Graceful shutdown flush**
 - Low allocation design (benchmarked)
-
----
-
-## 🎬 Demo
-
-Add a GIF here (highly recommended — huge impact on adoption):
-
-```
-SQS → Batch → Parquet → S3
-```
-
-Example path (recommended):
-
-- `./assets/demo.gif`
-
-```md
-![demo](./assets/demo.gif)
-```
-
-How to record quickly (Windows):
-- Use **ScreenToGif** or **ShareX**
-- Record ~8–12 seconds
-- Show: start app → ingest a few messages → S3 file appears
 
 ---
 
@@ -201,7 +178,7 @@ Designed for consistent delivery under normal operating conditions:
 
 Recommended:
 
-- `terminationGracePeriodSeconds >= FlushInterval` *(or a sensible upper bound for your flush)*
+- `terminationGracePeriodSeconds >= FlushInterval` _(or a sensible upper bound for your flush)_
 
 Behaviour on pod termination:
 
@@ -228,6 +205,7 @@ go test ./... -bench=. -benchmem
 ### Benchmark policy
 
 Performance-sensitive changes should:
+
 - include benchmarks
 - keep allocations stable (or justify increases)
 - explain tradeoffs in PR description
@@ -236,14 +214,14 @@ Performance-sensitive changes should:
 
 ## 🔥 Firehose vs Parquet Ingestor
 
-| Capability | Firehose | Parquet Ingestor |
-|---|---:|---:|
-| Custom batching | limited | ✅ full |
-| Custom transformations | limited | ✅ full |
-| Local dev / profiling | hard | ✅ easy |
-| Vendor lock-in | higher | ✅ lower |
-| FinOps control | lower | ✅ higher |
-| Pipeline extensibility | limited | ✅ pluggable |
+| Capability             | Firehose | Parquet Ingestor |
+| ---------------------- | -------: | ---------------: |
+| Custom batching        |  limited |          ✅ full |
+| Custom transformations |  limited |          ✅ full |
+| Local dev / profiling  |     hard |          ✅ easy |
+| Vendor lock-in         |   higher |         ✅ lower |
+| FinOps control         |    lower |        ✅ higher |
+| Pipeline extensibility |  limited |     ✅ pluggable |
 
 ---
 
@@ -257,6 +235,7 @@ This project is a good fit when you have:
 - strong cost controls (FinOps)
 
 Recommended additions (optional, common in enterprise):
+
 - OpenTelemetry metrics/exporter
 - structured logging
 - integration tests in CI (localstack / testcontainers)
@@ -279,7 +258,7 @@ Coverage upload is configured for **Codecov** (works well for public repos).
 
 ### Requirements
 
-- Go **1.26**
+- Go **1.25**
 - Make sure tests and lint pass
 
 ### Local checks
@@ -297,6 +276,7 @@ go test ./... -bench=. -benchmem
 ```
 
 Guidelines:
+
 - prefer composition
 - keep allocations low
 - add tests + benchmarks for perf changes
@@ -326,12 +306,15 @@ Do not open public issues for security vulnerabilities.
 ## ❓ FAQ
 
 ### Is it production ready?
+
 Yes — designed for high throughput ingestion with graceful shutdown flush.
 
 ### Does it guarantee delivery?
+
 It is designed for consistent delivery with shutdown flush support. For strict guarantees, combine with idempotent sinks and downstream dedupe where needed.
 
 ### Does it support other sources/sinks?
+
 The architecture is pluggable; SQS/S3 are the primary supported implementations currently.
 
 ---
@@ -341,6 +324,7 @@ The architecture is pluggable; SQS/S3 are the primary supported implementations 
 Maintainer: **Luiz Baldança**
 
 If you want help integrating this into your data platform or need consulting on:
+
 - high throughput Go pipelines
 - AWS messaging (SQS/SNS)
 - FinOps optimization
