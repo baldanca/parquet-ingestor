@@ -1,74 +1,61 @@
-name: Feature Pipeline (Go CI -> Bench -> PR -> Ready -> Auto-merge)
+name: Pipe 1 - Feature -> Develop (lint, tests, PR)
 
 on:
   push:
     branches:
       - "feat/**"
       - "feature/**"
-  pull_request:
-    branches:
-      - "main"
-    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
   pull-requests: write
 
 concurrency:
-  group: pipeline-${{ github.ref_name || github.event.pull_request.number }}
+  group: pipe1-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  ci:
-    name: CI (Go)
+  lint:
+    name: Lint (golangci-lint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Test
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test
         run: |
           set -euo pipefail
           go test ./...
 
-  benchmarks:
-    name: Benchmarks (optional)
+  pr:
+    name: Create/Update PR -> develop
     runs-on: ubuntu-latest
-    needs: [ci]
-    # Se quiser rodar SEMPRE, remova este if
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Bench
-        run: |
-          set -euo pipefail
-          go test ./... -bench=./... -benchmem
-
-  auto-pr:
-    name: Create/Update PR (-> main)
-    runs-on: ubuntu-latest
-    needs: [ci, benchmarks]
-    if: >
-      github.event_name == 'push' &&
-      needs.ci.result == 'success' &&
-      (needs.benchmarks.result == 'success' || needs.benchmarks.result == 'skipped')
-    outputs:
-      pr_number: ${{ steps.pr.outputs.pr_number }}
-      pr_draft: ${{ steps.pr.outputs.pr_draft }}
+    needs: [tests]
+    if: needs.tests.result == 'success'
     steps:
       - name: Create or update PR
-        id: pr
         uses: actions/github-script@v7
         with:
           github-token: ${{ github.token }}
@@ -76,7 +63,12 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const branch = context.ref.replace('refs/heads/', '');
-            const base = 'main';
+            const base = 'develop';
+
+            if (!branch.startsWith('feat/') && !branch.startsWith('feature/')) {
+              core.info(`Skipping: not a feature branch (${branch})`);
+              return;
+            }
 
             await github.rest.repos.getBranch({ owner, repo, branch: base });
 
@@ -91,65 +83,36 @@ jobs:
 
             const head = `${owner}:${branch}`;
             const prs = await github.rest.pulls.list({
-              owner, repo, state: 'open', base, head, per_page: 1,
+              owner,
+              repo,
+              state: 'open',
+              base,
+              head,
+              per_page: 1,
             });
 
-            let pr;
-            if (prs.data.length) {
-              pr = (await github.rest.pulls.update({
-                owner, repo, pull_number: prs.data[0].number, title, body,
-              })).data;
-              core.info(`Updated PR #${pr.number}: ${pr.html_url}`);
-            } else {
-              pr = (await github.rest.pulls.create({
-                owner, repo, head: branch, base, title, body, draft: true,
-              })).data;
-              core.info(`Created PR #${pr.number}: ${pr.html_url}`);
+            if (prs.data.length > 0) {
+              const pr = prs.data[0];
+              core.info(`Updating PR #${pr.number} (${pr.html_url})`);
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: pr.number,
+                title,
+                body,
+              });
+              return;
             }
 
-            core.setOutput('pr_number', String(pr.number));
-            core.setOutput('pr_draft', String(pr.draft));
+            core.info(`Creating PR for ${branch} -> ${base}`);
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              head: branch,
+              base,
+              title,
+              body,
+              draft: true,
+            });
 
-  ready-for-review:
-    name: Mark PR ready for review (optional)
-    runs-on: ubuntu-latest
-    needs: [auto-pr]
-    if: github.event_name == 'push' && needs.auto-pr.outputs.pr_draft == 'false'
-    steps:
-      - uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const pull_number = Number(`${{ needs.auto-pr.outputs.pr_number }}`);
-
-            await github.rest.pulls.markReadyForReview({ owner, repo, pull_number });
-            core.info(`PR #${pull_number} marked as ready for review`);
-
-  enable-auto-merge:
-    name: Enable Auto-merge (optional)
-    runs-on: ubuntu-latest
-    needs: [ready-for-review]
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const pull_number = Number(`${{ needs.auto-pr.outputs.pr_number }}`);
-
-            const pr = (await github.rest.pulls.get({ owner, repo, pull_number })).data;
-
-            await github.graphql(`
-              mutation($prId: ID!) {
-                enablePullRequestAutoMerge(input: {
-                  pullRequestId: $prId,
-                  mergeMethod: SQUASH
-                }) { pullRequest { number } }
-              }
-            `, { prId: pr.node_id });
-
-            core.info(`Auto-merge enabled for PR #${pull_number}`);
+            core.info(`Created PR #${created.data.number} (${created.data.html_url})`);
