@@ -1,10 +1,12 @@
 # Automatically apply labels based on changed files
+
 dependencies:
   - changed-files:
       - any-glob-to-any-file:
           - "go.mod"
           - "go.sum"
           - ".github/workflows/*.yml"
+          - ".github/workflows/*.yaml"
 
 ci:
   - changed-files:
