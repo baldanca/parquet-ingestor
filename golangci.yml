@@ -63,11 +63,11 @@ issues:
   max-issues-per-linter: 0
   max-same-issues: 0
 
-# Keep noise low on early-stage OSS; tighten later if you want.
-exclude-rules:
-  - path: _test\.go
-    linters:
-      - revive
-      - gocritic
-      - prealloc
-      - unparam
+  # Keep noise low on early-stage OSS; tighten later if you want.
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - revive
+        - gocritic
+        - prealloc
+        - unparam
