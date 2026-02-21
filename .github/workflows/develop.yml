@@ -1,0 +1,336 @@
+name: Pipe 2 - Develop -> Release/x.y.z (semver, bench, coverage, PR)
+
+on:
+  push:
+    branches:
+      - "develop"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pipe2-develop
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (develop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test
+        run: |
+          set -euo pipefail
+          go test ./...
+
+  coverage:
+    name: Coverage (threshold)
+    runs-on: ubuntu-latest
+    needs: [tests]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute coverage
+        id: coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          go test ./... -coverprofile=coverage.out
+
+          go run ./tools/coverrank \
+            -coverprofile=coverage.out \
+            -ignore=.covignore \
+            -markdown \
+            -top=20 > coverage.md
+
+          echo "---- Coverage ranking ----"
+          cat coverage.md
+
+          cov=$(go run ./tools/coverrank \
+            -coverprofile=coverage.out \
+            -ignore=.covignore \
+            -json | jq -r .coverage)
+
+          echo "coverage=$cov" >> $GITHUB_OUTPUT
+
+          echo "Coverage = $cov"
+
+      - name: Coverage delta vs develop
+        id: delta
+        shell: bash
+        run: |
+
+          git fetch origin develop
+
+          go test origin/develop/... -coverprofile=base.out || true
+
+          base=$(go run ./tools/coverrank \
+            -coverprofile=base.out \
+            -ignore=.covignore \
+            -json | jq -r .coverage || echo 0)
+
+          current="${{ steps.coverage.outputs.coverage }}"
+
+          delta=$(awk "BEGIN {print $current - $base}")
+
+          echo "delta=$delta" >> $GITHUB_OUTPUT
+
+      - name: Coverage status emoji
+        id: emoji
+        run: |
+
+          cov="${{ steps.coverage.outputs.coverage }}"
+
+          if (( $(echo "$cov >= 80" | bc -l) )); then
+            emoji="🟢"
+          elif (( $(echo "$cov >= 70" | bc -l) )); then
+            emoji="🟡"
+          else
+            emoji="🔴"
+          fi
+
+          echo "emoji=$emoji" >> $GITHUB_OUTPUT
+
+      - name: Comment coverage on PR
+        if: github.event.pull_request.number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+
+            const fs = require('fs')
+
+            const ranking =
+              fs.readFileSync('coverage.md','utf8')
+
+            const emoji =
+              "${{ steps.emoji.outputs.emoji }}"
+
+            const cov =
+              "${{ steps.coverage.outputs.coverage }}"
+
+            const delta =
+              "${{ steps.delta.outputs.delta }}"
+
+            const body =
+            `<!-- coverage-report -->
+
+            ## Coverage Report ${emoji}
+
+            Total Coverage: **${cov}%**
+
+            Delta vs develop: **${delta}%**
+
+            ${ranking}
+            `
+
+            const owner=context.repo.owner
+            const repo=context.repo.repo
+            const issue=context.issue.number
+
+            const comments=
+              await github.paginate(
+                github.rest.issues.listComments,
+                {owner,repo,issue_number:issue}
+              )
+
+            const existing=
+              comments.find(c=>
+                c.body.includes("coverage-report")
+              )
+
+            if(existing){
+
+              await github.rest.issues.updateComment({
+
+                owner,
+                repo,
+                comment_id:existing.id,
+                body
+
+              })
+
+            }else{
+
+              await github.rest.issues.createComment({
+
+                owner,
+                repo,
+                issue_number:issue,
+                body
+
+              })
+
+            }
+
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    needs: [tests]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go bench
+        run: |
+          set -euo pipefail
+          go test ./... -bench=./... -benchmem
+
+  create-release-pr:
+    name: Create/Update release/x.y.z -> main PR (auto semver)
+    runs-on: ubuntu-latest
+    needs: [coverage, benchmarks]
+    if: needs.coverage.result == 'success' && needs.benchmarks.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Compute next semantic version from Conventional Commits
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          # Latest semver tag vX.Y.Z, fallback to v0.0.0
+          latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1 || true)
+          if [[ -z "$latest" ]]; then
+            latest="v0.0.0"
+          fi
+
+          range="${latest}..HEAD"
+          log="$(git log "$range" --pretty=%B)"
+
+          bump="patch"
+
+          # MAJOR if any "BREAKING CHANGE" footer OR "type!:" (e.g. feat!: ...)
+          if echo "$log" | grep -qE 'BREAKING[ -]CHANGE:'; then
+            bump="major"
+          elif echo "$log" | grep -qE '^[a-zA-Z]+\(.+\)!:'; then
+            bump="major"
+          elif echo "$log" | grep -qE '^[a-zA-Z]+!:'; then
+            bump="major"
+          # MINOR if any feat:
+          elif echo "$log" | grep -qE '^feat(\(.+\))?:'; then
+            bump="minor"
+          else
+            bump="patch"
+          fi
+
+          ver="${latest#v}"
+          IFS='.' read -r major minor patch <<<"$ver"
+
+          case "$bump" in
+            major)
+              major=$((major + 1)); minor=0; patch=0;;
+            minor)
+              minor=$((minor + 1)); patch=0;;
+            patch)
+              patch=$((patch + 1));;
+          esac
+
+          next="${major}.${minor}.${patch}"
+          branch="release/${next}"
+          tag="v${next}"
+
+          echo "latest_tag=$latest" >> "$GITHUB_OUTPUT"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          echo "next_version=$next" >> "$GITHUB_OUTPUT"
+          echo "release_branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          echo "Computed bump=$bump from commits in $range"
+          echo "Next version: $next"
+
+      - name: Create/Update release branch at develop HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="${{ steps.ver.outputs.release_branch }}"
+          git checkout -B "$branch"
+          git push -u origin "$branch" --force-with-lease
+
+      - name: Create or update PR release -> main
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const base = 'main';
+            const headBranch = `${{ steps.ver.outputs.release_branch }}`;
+            const head = `${owner}:${headBranch}`;
+
+            await github.rest.repos.getBranch({ owner, repo, branch: base });
+
+            const title = `release: ${{ steps.ver.outputs.tag }} -> ${base}`;
+            const body = [
+              `Release PR generated automatically from \`develop\`.`,
+              ``,
+              `Release branch: \`${headBranch}\``,
+              `Target: \`${base}\``,
+              `Tag on merge: \`${{ steps.ver.outputs.tag }}\``,
+              `Bump type: \`${{ steps.ver.outputs.bump }}\``,
+              ``,
+              `Derived from latest tag: \`${{ steps.ver.outputs.latest_tag }}\``,
+            ].join('\n');
+
+            const prs = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base,
+              head,
+              per_page: 1,
+            });
+
+            if (prs.data.length > 0) {
+              const pr = prs.data[0];
+              core.info(`Updating PR #${pr.number} (${pr.html_url})`);
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: pr.number,
+                title,
+                body,
+              });
+              return;
+            }
+
+            core.info(`Creating PR for ${headBranch} -> ${base}`);
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              head: headBranch,
+              base,
+              title,
+              body,
+              draft: false,
+            });
+
+            core.info(`Created PR #${created.data.number} (${created.data.html_url})`);

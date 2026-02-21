@@ -1,0 +1,55 @@
+# Automatically apply labels based on changed files
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "go.mod"
+          - "go.sum"
+          - ".github/workflows/*.yml"
+          - ".github/workflows/*.yaml"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+
+encoder:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "encoder/**"
+
+ingestor:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "ingestor/**"
+
+source:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "source/**"
+
+sink:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "sink/**"
+
+batcher:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "batcher/**"
+
+transformer:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "transformer/**"
+
+performance:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*bench*"
+          - "**/*benchmark*"
