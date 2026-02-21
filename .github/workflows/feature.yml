@@ -14,34 +14,44 @@ concurrency:
   group: pipe1-${{ github.ref_name }}
   cancel-in-progress: true
 
+env:
+  GO_VERSION: "1.25.x"
+
 jobs:
   lint:
     name: Lint (golangci-lint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # IMPORTANTE: precisa ser >= versão que já vem buildada com Go >= 1.25
+          # se quebrar no futuro, sobe aqui (v1.66+ é o mínimo recomendado hoje)
+          version: v1.66.0
           args: --timeout=5m
+          # cache do golangci (muito ganho em repo Go)
+          skip-cache: false
 
   tests:
     name: Tests
     runs-on: ubuntu-latest
-    needs: [lint]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: go test
@@ -52,8 +62,8 @@ jobs:
   pr:
     name: Create/Update PR -> develop
     runs-on: ubuntu-latest
-    needs: [tests]
-    if: needs.tests.result == 'success'
+    needs: [lint, tests]
+    if: needs.lint.result == 'success' && needs.tests.result == 'success'
     steps:
       - name: Create or update PR
         uses: actions/github-script@v7
