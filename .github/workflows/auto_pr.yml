@@ -37,86 +37,54 @@ jobs:
           AUTO_PR_REVIEWERS: ${{ vars.AUTO_PR_REVIEWERS }}
         shell: bash
         run: |
-          set -euo pipefail
+  set -euo pipefail
 
-          # Only feature branches (extra safety)
-          if [[ "$BRANCH" != feat/* && "$BRANCH" != feature/* ]]; then
-            echo "Not a feature branch: $BRANCH. Skipping."
-            exit 0
-          fi
+  if [[ "$BRANCH" != feat/* && "$BRANCH" != feature/* ]]; then
+    echo "Not a feature branch: $BRANCH. Skipping."
+    exit 0
+  fi
 
-          # Ensure develop exists
-          gh api "repos/$REPO/branches/develop" >/dev/null
+  gh api "repos/$REPO/branches/develop" >/dev/null
 
-          # PR title/body (avoid YAML/encoding issues)
-          title="feat: ${BRANCH} -> develop"
+  title="feat: ${BRANCH} -> develop"
 
-          body="$(cat <<EOF
+  cat > pr_body.txt <<EOT
 This PR was automatically created/maintained by CI.
 
-- Source: \`${BRANCH}\`
-- Target: \`develop\`
+- Source: ${BRANCH}
+- Target: develop
 
 Notes:
 - Pushes to this branch keep this PR up to date.
 - PR is created as Draft by default; mark Ready when CI is green.
-EOF
-)"
+EOT
 
-          # Check if an open PR already exists
-          existing="$(gh pr list \
-            --repo "$REPO" \
-            --state open \
-            --base develop \
-            --head "$BRANCH" \
-            --json number \
-            --jq '.[0].number // empty')"
+  existing="$(gh pr list \
+    --repo "$REPO" \
+    --state open \
+    --base develop \
+    --head "$BRANCH" \
+    --json number \
+    --jq '.[0].number // empty')"
 
-          if [[ -n "${existing:-}" ]]; then
-            echo "PR exists: #$existing. Updating metadata..."
-            gh pr edit "$existing" \
-              --repo "$REPO" \
-              --title "$title" \
-              --body "$body" \
-              --add-label "feature" \
-              --add-label "auto-pr" \
-              --add-assignee "$ACTOR" || true
+  if [[ -n "${existing:-}" ]]; then
+    gh pr edit "$existing" \
+      --repo "$REPO" \
+      --title "$title" \
+      --body-file pr_body.txt \
+      --add-label "feature" \
+      --add-label "auto-pr" \
+      --add-assignee "$ACTOR" || true
 
-            # Optional reviewers: repo variable AUTO_PR_REVIEWERS="user1,user2"
-            if [[ -n "${AUTO_PR_REVIEWERS:-}" ]]; then
-              IFS=',' read -ra reviewers <<< "$AUTO_PR_REVIEWERS"
-              for r in "${reviewers[@]}"; do
-                rr="$(echo "$r" | xargs)"
-                [[ -n "$rr" ]] && gh pr edit "$existing" --repo "$REPO" --add-reviewer "$rr" || true
-              done
-            fi
+    exit 0
+  fi
 
-            exit 0
-          fi
+  pr_url="$(gh pr create \
+    --repo "$REPO" \
+    --base develop \
+    --head "$BRANCH" \
+    --title "$title" \
+    --body-file pr_body.txt \
+    --draft)"
 
-          echo "No PR found. Creating Draft PR..."
-          pr_url="$(gh pr create \
-            --repo "$REPO" \
-            --base develop \
-            --head "$BRANCH" \
-            --title "$title" \
-            --body "$body" \
-            --draft)"
-
-          pr_number="$(echo "$pr_url" | awk -F/ '{print $NF}')"
-
-          gh pr edit "$pr_number" \
-            --repo "$REPO" \
-            --add-label "feature" \
-            --add-label "auto-pr" \
-            --add-assignee "$ACTOR" || true
-
-          if [[ -n "${AUTO_PR_REVIEWERS:-}" ]]; then
-            IFS=',' read -ra reviewers <<< "$AUTO_PR_REVIEWERS"
-            for r in "${reviewers[@]}"; do
-              rr="$(echo "$r" | xargs)"
-              [[ -n "$rr" ]] && gh pr edit "$pr_number" --repo "$REPO" --add-reviewer "$rr" || true
-            done
-          fi
-
-          echo "Created PR: $pr_url"
+  echo "Created PR: $pr_url"
