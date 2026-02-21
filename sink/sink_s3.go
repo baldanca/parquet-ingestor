@@ -111,7 +111,7 @@ func (s *S3Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error 
 	}
 
 	pr, pw := io.Pipe()
-	defer pr.Close()
+	defer func() { _ = pr.Close() }()
 
 	var (
 		wg   sync.WaitGroup

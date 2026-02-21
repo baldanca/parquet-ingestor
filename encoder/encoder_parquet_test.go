@@ -22,7 +22,7 @@ func readAllParquet[T any](t *testing.T, b []byte) ([]T, error) {
 	t.Helper()
 
 	r := parquet.NewGenericReader[T](bytes.NewReader(b))
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	const batchSize = 256
 	buf := make([]T, batchSize)

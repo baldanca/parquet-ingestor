@@ -163,8 +163,8 @@ func TestAckGroup_Clear_EmptiesButReusesCapacity(t *testing.T) {
 	}
 }
 
-type big1k struct{ buf [1024]byte }
-type big4k struct{ buf [4096]byte }
+type big1k struct{ _ [1024]byte }
+type big4k struct{ _ [4096]byte }
 
 type msgPtr1k struct{ p *big1k }
 type msgPtr4k struct{ p *big4k }
