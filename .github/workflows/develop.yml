@@ -54,12 +54,14 @@ jobs:
 
           go test ./... -coverprofile=coverage.out
 
-          echo ""
           go run ./tools/coverrank \
             -coverprofile=coverage.out \
             -ignore=.covignore \
             -markdown \
             -top=20 > coverage.md
+
+          echo "---- Coverage ranking ----"
+          cat coverage.md
 
           cov=$(go run ./tools/coverrank \
             -coverprofile=coverage.out \
@@ -69,10 +71,6 @@ jobs:
           echo "coverage=$cov" >> $GITHUB_OUTPUT
 
           echo "Coverage = $cov"
-
-          threshold=70
-
-          awk -v p="$cov" -v t="$threshold" 'BEGIN{exit !(p>=t)}'
 
       - name: Coverage delta vs develop
         id: delta

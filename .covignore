@@ -1,4 +1,4 @@
-/examples/**
-/transformer/**
-/tests/**
-/tools/**
+examples/**
+transformer/**
+tests/**
+tools/**
