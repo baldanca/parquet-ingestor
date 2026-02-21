@@ -58,7 +58,7 @@ func (s *fakeSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest)
 	s.lastKey = req.Key
 
 	s.buf.Reset()
-	return req.Writer.WriteTo(&s.buf)
+	return req.Writer.Write(&s.buf)
 }
 
 var _ sink.Sinkr = (*fakeSink)(nil)
@@ -184,7 +184,7 @@ type benchSink struct{}
 
 func (benchSink) Write(ctx context.Context, req sink.WriteRequest) error { return nil }
 func (benchSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) error {
-	return req.Writer.WriteTo(io.Discard)
+	return req.Writer.Write(io.Discard)
 }
 
 var _ sink.Sinkr = (*benchSink)(nil)

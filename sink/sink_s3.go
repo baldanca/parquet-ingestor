@@ -120,7 +120,7 @@ func (s *S3Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := req.Writer.WriteTo(pw)
+		err := req.Writer.Write(pw)
 		werr = err
 		_ = pw.CloseWithError(err)
 	}()

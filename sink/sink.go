@@ -17,7 +17,7 @@ type WriteRequest struct {
 // Implementations should return only after all bytes were written or an error
 // occurred.
 type StreamWriter interface {
-	WriteTo(w io.Writer) error
+	Write(w io.Writer) error
 }
 
 // StreamWriteRequest describes a streaming write to a sink destination.

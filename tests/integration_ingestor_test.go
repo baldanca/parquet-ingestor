@@ -93,7 +93,7 @@ func (w countingWriter) Write(p []byte) (int, error) {
 
 func (s *memSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) error {
 	var n int64
-	err := req.Writer.WriteTo(io.MultiWriter(io.Discard, countingWriter{n: &n}))
+	err := req.Writer.Write(io.MultiWriter(io.Discard, countingWriter{n: &n}))
 	if err != nil {
 		return err
 	}

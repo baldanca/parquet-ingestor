@@ -47,7 +47,7 @@ type blackholeSink struct{}
 
 func (s blackholeSink) Write(ctx context.Context, req sink.WriteRequest) error { return nil }
 func (s blackholeSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) error {
-	return req.Writer.WriteTo(io.Discard)
+	return req.Writer.Write(io.Discard)
 }
 
 func BenchmarkIntegration_Ingestor_Streaming(b *testing.B) {

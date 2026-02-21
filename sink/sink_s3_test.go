@@ -78,7 +78,7 @@ type bytesStreamWriter struct {
 	b []byte
 }
 
-func (w bytesStreamWriter) WriteTo(dst io.Writer) error {
+func (w bytesStreamWriter) Write(dst io.Writer) error {
 	_, err := dst.Write(w.b)
 	return err
 }
@@ -87,7 +87,7 @@ type errStreamWriter struct {
 	err error
 }
 
-func (w errStreamWriter) WriteTo(dst io.Writer) error {
+func (w errStreamWriter) Write(dst io.Writer) error {
 	_ = dst
 	return w.err
 }

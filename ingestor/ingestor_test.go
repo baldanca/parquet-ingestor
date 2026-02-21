@@ -150,7 +150,7 @@ func (s *tSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) er
 		atomic.AddInt32(&s.writeFails, -1)
 		return errors.New("write stream fail")
 	}
-	return req.Writer.WriteTo(io.Discard)
+	return req.Writer.Write(io.Discard)
 }
 
 var _ sink.Sinkr = (*tSink)(nil)
@@ -441,7 +441,7 @@ type bStreamSink struct{}
 
 func (bStreamSink) Write(ctx context.Context, req sink.WriteRequest) error { return nil }
 func (bStreamSink) WriteStream(ctx context.Context, req sink.StreamWriteRequest) error {
-	return req.Writer.WriteTo(io.Discard)
+	return req.Writer.Write(io.Discard)
 }
 
 var _ sink.Sinkr = (*bStreamSink)(nil)

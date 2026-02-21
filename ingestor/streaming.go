@@ -14,7 +14,7 @@ type encodeToWriter[iType any] struct {
 	items []iType
 }
 
-func (w encodeToWriter[iType]) WriteTo(dst io.Writer) error {
+func (w encodeToWriter[iType]) Write(dst io.Writer) error {
 	return w.se.EncodeTo(w.ctx, w.items, dst)
 }
 
