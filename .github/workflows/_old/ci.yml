@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.x"
+  GO_MOD_VERSION: "1.25"
+  COVERAGE_MIN: "70"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ============================
+      # Validate go.mod Go version
+      # ============================
+      - name: Validate go.mod Go version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mod_version=$(grep "^go " go.mod | awk '{print $2}')
+          echo "go.mod version = $mod_version"
+          echo "expected       = ${GO_MOD_VERSION}"
+          if [[ "$mod_version" != "${GO_MOD_VERSION}" ]]; then
+            echo "❌ go.mod Go version must be ${GO_MOD_VERSION}"
+            exit 1
+          fi
+
+      # ============================
+      # Setup Go
+      # ============================
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify Go version
+        run: go version
+
+      - name: Download deps
+        run: go mod download
+
+      # ============================
+      # gofmt check (no diffs allowed)
+      # ============================
+      - name: gofmt check
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=$(gofmt -l .)
+          if [[ -n "$bad" ]]; then
+            echo "❌ gofmt needed for:"
+            echo "$bad"
+            echo
+            echo "Run: gofmt -w ."
+            exit 1
+          fi
+
+      # ============================
+      # go mod tidy check (no diffs allowed)
+      # ============================
+      - name: go mod tidy check
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "❌ go.mod/go.sum are not tidy."
+            echo "Run: go mod tidy"
+            echo
+            git diff -- go.mod go.sum || true
+            exit 1
+          fi
+
+      # ============================
+      # go vet
+      # ============================
+      - name: go vet
+        run: go vet ./...
+
+      # ============================
+      # Tests
+      # ============================
+      - name: Tests (race)
+        run: go test ./... -race
+
+      # ============================
+      # Coverage
+      # ============================
+      - name: Coverage
+        run: |
+          go test ./... \
+            -race \
+            -coverprofile=coverage.out \
+            -covermode=atomic
+
+      - name: Coverage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(go tool cover -func=coverage.out | awk '/^total:/{print $3}' | sed 's/%//')
+          echo "Total coverage: ${total}%"
+          awk -v t="$total" -v min="${COVERAGE_MIN}" 'BEGIN{ exit !(t+0 >= min+0) }' \
+            || (echo "❌ Coverage ${total}% is below minimum ${COVERAGE_MIN}%." && exit 1)
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+
+      # ============================
+      # golangci-lint
+      # ============================
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m

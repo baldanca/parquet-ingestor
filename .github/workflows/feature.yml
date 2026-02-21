@@ -1,0 +1,146 @@
+name: Pipe 1 - Feature -> Develop (lint, tests, PR)
+
+on:
+  push:
+    branches:
+      - "feat/**"
+      - "feature/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pipe1-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.25.x"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go mod tidy check
+        run: |
+          set -euo pipefail
+          go mod tidy
+          git diff --exit-code
+
+      - name: go fmt check
+        run: |
+          set -euo pipefail
+          fmt=$(gofmt -l .)
+          if [ -n "$fmt" ]; then
+            echo "Files not formatted:"
+            echo "$fmt"
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.7.2
+          args: --timeout=5m
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go test
+        run: |
+          set -euo pipefail
+          go test ./...
+
+  pr:
+    name: Create/Update PR -> develop
+    runs-on: ubuntu-latest
+    needs: [lint, tests]
+    if: needs.lint.result == 'success' && needs.tests.result == 'success'
+    steps:
+      - name: Create or update PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = context.ref.replace('refs/heads/', '');
+            const base = 'develop';
+
+            if (!branch.startsWith('feat/') && !branch.startsWith('feature/')) {
+              core.info(`Skipping: not a feature branch (${branch})`);
+              return;
+            }
+
+            await github.rest.repos.getBranch({ owner, repo, branch: base });
+
+            const title = `feat: ${branch} -> ${base}`;
+            const body = [
+              `This PR was automatically created/updated by GitHub Actions.`,
+              ``,
+              `Source: \`${branch}\``,
+              `Target: \`${base}\``,
+              `Actor: @${context.actor}`,
+            ].join('\n');
+
+            const head = `${owner}:${branch}`;
+
+            const prs = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base,
+              head,
+              per_page: 1,
+            });
+
+            if (prs.data.length > 0) {
+              const pr = prs.data[0];
+              core.info(`Updating PR #${pr.number} (${pr.html_url})`);
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: pr.number,
+                title,
+                body,
+              });
+              return;
+            }
+
+            core.info(`Creating PR for ${branch} -> ${base}`);
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              head: branch,
+              base,
+              title,
+              body,
+              draft: false,
+            });
+
+            core.info(`Created PR #${created.data.number} (${created.data.html_url})`);

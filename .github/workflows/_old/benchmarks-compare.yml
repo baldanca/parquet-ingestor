@@ -1,0 +1,85 @@
+name: Bench Regression (benchstat)
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [develop]
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  GO_VERSION: "1.25.x"
+  BENCH_ARGS: "./... -bench=. -benchmem -count=5"
+
+jobs:
+  bench:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-bench' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      - name: Capture base SHA
+        id: base
+        run: echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Run benchmarks on BASE (develop)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout ${{ steps.base.outputs.sha }}
+          go test ${{ env.BENCH_ARGS }} | tee base.txt
+
+      - name: Run benchmarks on HEAD (PR)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout ${{ github.sha }}
+          go test ${{ env.BENCH_ARGS }} | tee head.txt
+
+      - name: Benchstat diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          benchstat base.txt head.txt | tee benchstat.txt
+          {
+            echo "## Bench Regression (benchstat)"
+            echo ""
+            echo "**Base**: \`${{ steps.base.outputs.sha }}\`"
+            echo "**Head**: \`${{ github.sha }}\`"
+            echo ""
+            echo "\`\`\`"
+            tail -n 200 benchstat.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment results on PR
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const txt = fs.readFileSync('benchstat.txt','utf8')
+              .split('\n').slice(-200).join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `## Bench Regression (benchstat)\n\n\`\`\`\n${txt}\n\`\`\`\n\n> Tip: add label \`run-bench\` to re-run.`
+            });

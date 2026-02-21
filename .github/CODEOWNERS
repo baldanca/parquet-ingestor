@@ -1,0 +1,16 @@
+# Default owners for everything in the repo
+* @baldanca
+
+# GitHub meta
+.github/ @baldanca
+
+# Go modules
+go.mod go.sum @baldanca
+
+# Core packages (adjust if you want more granular ownership)
+/ingestor/ @baldanca
+/source/ @baldanca
+/sink/ @baldanca
+/encoder/ @baldanca
+/batcher/ @baldanca
+/transformer/ @baldanca
