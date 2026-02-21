@@ -64,6 +64,18 @@ func main() {
 		return list[i].pct < list[j].pct
 	})
 
+	overall := float64(covered) * 100 / float64(total)
+
+	if *jsonOut {
+
+		fmt.Printf(
+			`{"coverage":%.2f}`,
+			overall,
+		)
+
+		return
+	}
+
 	if *markdown {
 
 		fmt.Println("## Coverage Ranking")
@@ -107,18 +119,6 @@ func main() {
 			)
 
 		}
-	}
-
-	overall := float64(covered) * 100 / float64(total)
-
-	if *jsonOut {
-
-		fmt.Printf(
-			`{"coverage":%.2f}`,
-			overall,
-		)
-
-		return
 	}
 
 	fmt.Printf(
