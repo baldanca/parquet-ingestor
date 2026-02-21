@@ -47,41 +47,140 @@ jobs:
           cache: true
 
       - name: Compute coverage
+        id: coverage
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Generating package list..."
+          go test ./... -coverprofile=coverage.out
 
-          PKGS=$(go list ./...)
+          echo ""
+          go run ./tools/coverrank \
+            -coverprofile=coverage.out \
+            -ignore=.covignore \
+            -markdown \
+            -top=20 > coverage.md
 
-          if [ -f .covignore ]; then
-            echo "Applying .covignore rules..."
-            while IFS= read -r ignore; do
-              [ -z "$ignore" ] && continue
-              PKGS=$(echo "$PKGS" | grep -v "$ignore" || true)
-            done < .covignore
+          cov=$(go run ./tools/coverrank \
+            -coverprofile=coverage.out \
+            -ignore=.covignore \
+            -json | jq -r .coverage)
+
+          echo "coverage=$cov" >> $GITHUB_OUTPUT
+
+          echo "Coverage = $cov"
+
+          threshold=70
+
+          awk -v p="$cov" -v t="$threshold" 'BEGIN{exit !(p>=t)}'
+
+      - name: Coverage delta vs develop
+        id: delta
+        shell: bash
+        run: |
+
+          git fetch origin develop
+
+          go test origin/develop/... -coverprofile=base.out || true
+
+          base=$(go run ./tools/coverrank \
+            -coverprofile=base.out \
+            -ignore=.covignore \
+            -json | jq -r .coverage || echo 0)
+
+          current="${{ steps.coverage.outputs.coverage }}"
+
+          delta=$(awk "BEGIN {print $current - $base}")
+
+          echo "delta=$delta" >> $GITHUB_OUTPUT
+
+      - name: Coverage status emoji
+        id: emoji
+        run: |
+
+          cov="${{ steps.coverage.outputs.coverage }}"
+
+          if (( $(echo "$cov >= 80" | bc -l) )); then
+            emoji="🟢"
+          elif (( $(echo "$cov >= 70" | bc -l) )); then
+            emoji="🟡"
+          else
+            emoji="🔴"
           fi
 
-          echo "Packages used for coverage:"
-          echo "$PKGS"
+          echo "emoji=$emoji" >> $GITHUB_OUTPUT
 
-          go test $PKGS -coverprofile=coverage.out
+      - name: Comment coverage on PR
+        if: github.event.pull_request.number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
 
-          echo ""
-          go run ./tools/coverrank -coverprofile=coverage.out -top 30
-          echo ""
+            const fs = require('fs')
 
-          go tool cover -func=coverage.out | tail -n 1 | tee coverage.txt
+            const ranking =
+              fs.readFileSync('coverage.md','utf8')
 
-          pct=$(awk '{print $3}' coverage.txt | tr -d '%')
-          echo "Total coverage: $pct%"
+            const emoji =
+              "${{ steps.emoji.outputs.emoji }}"
 
-          threshold=70.0
-          awk -v p="$pct" -v t="$threshold" 'BEGIN { exit !(p+0 >= t+0) }' || {
-            echo "Coverage $pct% is below threshold $threshold%"
-            exit 1
-          }
+            const cov =
+              "${{ steps.coverage.outputs.coverage }}"
+
+            const delta =
+              "${{ steps.delta.outputs.delta }}"
+
+            const body =
+            `<!-- coverage-report -->
+
+            ## Coverage Report ${emoji}
+
+            Total Coverage: **${cov}%**
+
+            Delta vs develop: **${delta}%**
+
+            ${ranking}
+            `
+
+            const owner=context.repo.owner
+            const repo=context.repo.repo
+            const issue=context.issue.number
+
+            const comments=
+              await github.paginate(
+                github.rest.issues.listComments,
+                {owner,repo,issue_number:issue}
+              )
+
+            const existing=
+              comments.find(c=>
+                c.body.includes("coverage-report")
+              )
+
+            if(existing){
+
+              await github.rest.issues.updateComment({
+
+                owner,
+                repo,
+                comment_id:existing.id,
+                body
+
+              })
+
+            }else{
+
+              await github.rest.issues.createComment({
+
+                owner,
+                repo,
+                issue_number:issue,
+                body
+
+              })
+
+            }
 
   benchmarks:
     name: Benchmarks
