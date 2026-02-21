@@ -13,7 +13,6 @@ permissions:
 jobs:
   auto-pr:
     runs-on: ubuntu-latest
-
     steps:
       - name: Create or update PR
         uses: peter-evans/create-pull-request@v6
@@ -26,7 +25,10 @@ jobs:
             Auto PR created by workflow.
 
             Source: `${{ github.ref_name }}`
-            Target: develop
+            Target: `develop`
+
+            - CI will run automatically.
+            - Bench regression check runs on demand or via label.
           draft: true
           labels: |
             feature
