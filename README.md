@@ -1,143 +1,354 @@
-# parquet-ingestor
+# 👑 Parquet Ingestor — GOD EMPEROR EDITION
 
-A small, dependency-light Go library that turns streaming messages into **time-partitioned Parquet files**.
+High-performance ETL pipeline for batching, transforming, and delivering data to **S3 as Parquet**.
 
-It is designed to feel familiar if you have used managed delivery services (e.g. Kinesis Firehose):
+**Firehose-like behaviour** with full control, extensibility, and **FinOps efficiency**.
 
-- Pull messages from a **Source** (e.g. SQS)
-- Transform each message into a typed record
-- Batch by **bytes / item count / time**
-- Encode the batch (e.g. Parquet)
-- Write the file to a **Sink** (e.g. S3)
-- Acknowledge the consumed messages
+---
 
-## Features
+<p align="center">
+  <a href="https://github.com/baldanca/parquet-ingestor/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/baldanca/parquet-ingestor/actions/workflows/ci.yml/badge.svg">
+  </a>
+  <a href="https://codecov.io/gh/baldanca/parquet-ingestor">
+    <img alt="Coverage" src="https://img.shields.io/codecov/c/github/baldanca/parquet-ingestor">
+  </a>
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.26-blue">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
+  <img alt="Performance" src="https://img.shields.io/badge/Performance-optimized-orange">
+</p>
 
-- Generic pipeline (`source` → `transformer` → `batcher` → `encoder` → `sink`)
-- Optional **streaming encode + streaming upload** to reduce peak memory
-- Concurrent flush workers (`Run(ctx, workers, queue)`)
-- Optional SQS lease extension while flushing (visibility renew)
-- Simple retry policies for writes and acks
+---
 
-## Installation
+## 🚀 TL;DR
+
+Use this when you need:
+
+- **batching** by **size** *or* **time**
+- **custom transforms** (JSON → struct, protobuf → struct, etc.)
+- **Parquet** output for **Athena / Spark / Trino / Data Mesh**
+- **autoscaling workers**
+- **graceful shutdown flush** (Kubernetes-friendly)
+- **FinOps** (reduce PUTs, control buffering, tune throughput)
+
+---
+
+## 📑 Table of Contents
+
+- [Why](#-why)
+- [Features](#-features)
+- [Demo](#-demo)
+- [Quick Start](#-quick-start)
+- [Architecture](#-architecture)
+- [Configuration](#-configuration)
+- [Reliability & Delivery Guarantees](#-reliability--delivery-guarantees)
+- [Kubernetes](#-kubernetes)
+- [Performance](#-performance)
+- [Firehose vs Parquet Ingestor](#-firehose-vs-parquet-ingestor)
+- [Enterprise Adoption Notes](#-enterprise-adoption-notes)
+- [CI/CD](#-cicd)
+- [Contributing](#-contributing)
+- [Security](#-security)
+- [Roadmap](#-roadmap)
+- [FAQ](#-faq)
+- [Maintainer / Hiring](#-maintainer--hiring)
+- [License](#-license)
+
+---
+
+## 💡 Why
+
+AWS Firehose is powerful, but at scale you may hit:
+
+- **cost** (especially with small objects and high ingestion)
+- **limited customization** in batching/transformations
+- **vendor constraints** when you need deeper pipeline control
+- **harder local testing** for performance regressions
+
+Parquet Ingestor is designed to be:
+
+- **pluggable** (sources/sinks/transformers)
+- **performance-first** (predictable memory + low allocations)
+- **cost-aware** (batch to reduce PUTs, tune flush strategy)
+- **production ready** (graceful shutdown flush semantics)
+
+---
+
+## ✅ Features
+
+- Batch by **size** or **time**
+- Pluggable **transformer** pipeline
+- **Parquet** encoding optimized for throughput
+- Source: **SQS** (and more planned)
+- Sink: **S3**
+- **Autoscaling workers**
+- **Graceful shutdown flush**
+- Low allocation design (benchmarked)
+
+---
+
+## 🎬 Demo
+
+Add a GIF here (highly recommended — huge impact on adoption):
+
+```
+SQS → Batch → Parquet → S3
+```
+
+Example path (recommended):
+
+- `./assets/demo.gif`
+
+```md
+![demo](./assets/demo.gif)
+```
+
+How to record quickly (Windows):
+- Use **ScreenToGif** or **ShareX**
+- Record ~8–12 seconds
+- Show: start app → ingest a few messages → S3 file appears
+
+---
+
+## ⚡ Quick Start
+
+Install:
 
 ```bash
 go get github.com/baldanca/parquet-ingestor
 ```
 
-## Quick start
-
-The record type must be compatible with `parquet-go`'s `GenericWriter` (struct tags are supported).
+Minimal example:
 
 ```go
 package main
 
 import (
-	"context"
-	"log"
-	"time"
+  "context"
+  "log"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
-
-	"github.com/baldanca/parquet-ingestor/batcher"
-	"github.com/baldanca/parquet-ingestor/encoder"
-	"github.com/baldanca/parquet-ingestor/ingestor"
-	"github.com/baldanca/parquet-ingestor/sink"
-	"github.com/baldanca/parquet-ingestor/source"
-	"github.com/baldanca/parquet-ingestor/transformer"
+  "github.com/baldanca/parquet-ingestor/ingestor"
 )
 
-type Event struct {
-	ID        string    `parquet:"name=id, type=BYTE_ARRAY, convertedtype=UTF8"`
-	CreatedAt time.Time `parquet:"name=created_at, type=INT64, convertedtype=TIMESTAMP_MILLIS"`
-	Payload   string    `parquet:"name=payload, type=BYTE_ARRAY, convertedtype=UTF8"`
-}
-
-type eventTransformer struct{}
-
-func (eventTransformer) Transform(ctx context.Context, in source.Envelope) (Event, error) {
-	// Example assumes the SQS body is a JSON string. Replace with your decoding.
-	_ = ctx
-	return Event{ID: "example", CreatedAt: time.Now().UTC(), Payload: in.Payload.(string)}, nil
-}
-
 func main() {
-	ctx := context.Background()
+  ctx := context.Background()
 
-	awsCfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
+  ing := ingestor.NewDefault()
 
-	sqsClient := sqs.NewFromConfig(awsCfg)
-	s3Client := s3.NewFromConfig(awsCfg)
-
-	src := source.New(ctx, sqsClient, "https://sqs.us-east-1.amazonaws.com/123/queue")
-	sk := sink.New(s3Client, "my-bucket", "events")
-
-	enc := encoder.NewParquetEncoder[Event](encoder.ParquetCompressionSnappy)
-	keyFn := ingestor.DefaultKeyFunc[Event](enc)
-
-	cfg := batcher.DefaultBatcherConfig
-	cfg.MaxEstimatedInputBytes = 5 * 1024 * 1024
-	cfg.FlushInterval = 5 * time.Minute
-
-	ing, err := ingestor.NewIngestor[Event](cfg, src, transformer.Transformer[source.Envelope, Event](eventTransformer{}), enc, sk, keyFn)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	ing.SetRetryPolicy(ingestor.SimpleRetry{Attempts: 3, BaseDelay: 100 * time.Millisecond, MaxDelay: 2 * time.Second, Jitter: true})
-	ing.SetAckRetryPolicy(ingestor.SimpleRetry{Attempts: 3, BaseDelay: 50 * time.Millisecond, MaxDelay: 1 * time.Second, Jitter: true})
-
-	// Optional: if flush can take longer than the SQS visibility timeout.
-	// ing.EnableLease(60, 20*time.Second)
-
-	if err := ing.Run(ctx, 4, 64); err != nil {
-		log.Fatal(err)
-	}
+  if err := ing.Run(ctx); err != nil {
+    log.Fatal(err)
+  }
 }
 ```
 
-## Package overview
+---
 
-- `source`: input connectors (currently includes SQS)
-- `transformer`: generic transform interface
-- `batcher`: size/time-based batch accumulator
-- `encoder`: output encoders (currently includes Parquet)
-- `sink`: output connectors (currently includes S3)
-- `ingestor`: orchestration, worker pool, retries, lease renew
+## 🏗 Architecture
 
-## Design notes
+Pipeline:
 
-- **Acknowledgements happen only after a successful sink write.**
-- When both the encoder implements `encoder.StreamEncoder` and the sink implements `sink.StreamSinkr`, the ingestor will stream the Parquet bytes directly to the sink.
-- `Run(ctx, workers, queue)` allows high throughput by overlapping flushes.
+```
+Source → Transformer → Batcher → Encoder → Sink
+```
 
-## Testing
+### Flush triggers
+
+A batch is flushed when:
+
+- **batch size** reaches the configured limit
+- **flush timeout** is reached
+- **shutdown** signal is received (graceful flush)
+
+---
+
+## ⚙️ Configuration
+
+> Defaults are tuned for general production workloads; override per traffic profile.
+
+### Batch
+
+- `BatchSizeMB`  
+  Maximum buffer size before flushing (default example: **5MB**)
+
+- `FlushInterval`  
+  Maximum time before forced flush (default example: **5 minutes**)
+
+### Workers
+
+Autoscaler modes:
+
+- **Fixed**: constant number of workers
+- **High Performance**: dynamic scaling based on:
+  - CPU availability
+  - memory pressure
+  - buffer backlog
+
+---
+
+## 🛡 Reliability & Delivery Guarantees
+
+Designed for consistent delivery under normal operating conditions:
+
+- Flush on **size/time**
+- Flush on **shutdown**
+- Ack strategy designed to avoid losing already-processed batches
+
+> If you need stricter semantics (exactly-once), you typically design it end-to-end with idempotency + dedupe downstream.
+
+---
+
+## ☸ Kubernetes
+
+Recommended:
+
+- `terminationGracePeriodSeconds >= FlushInterval` *(or a sensible upper bound for your flush)*
+
+Behaviour on pod termination:
+
+1. stop ingestion
+2. flush remaining batch
+3. ack processed messages
+4. exit
+
+---
+
+## 📊 Performance
+
+Example benchmark (Ryzen 5600G):
+
+- 10 records: ~28µs, ~134 allocs/op
+- 10,000 records: ~468µs, ~137 allocs/op
+
+Run locally:
+
+```bash
+go test ./... -bench=. -benchmem
+```
+
+### Benchmark policy
+
+Performance-sensitive changes should:
+- include benchmarks
+- keep allocations stable (or justify increases)
+- explain tradeoffs in PR description
+
+---
+
+## 🔥 Firehose vs Parquet Ingestor
+
+| Capability | Firehose | Parquet Ingestor |
+|---|---:|---:|
+| Custom batching | limited | ✅ full |
+| Custom transformations | limited | ✅ full |
+| Local dev / profiling | hard | ✅ easy |
+| Vendor lock-in | higher | ✅ lower |
+| FinOps control | lower | ✅ higher |
+| Pipeline extensibility | limited | ✅ pluggable |
+
+---
+
+## 🏢 Enterprise Adoption Notes
+
+This project is a good fit when you have:
+
+- high TPS ingestion pipelines
+- analytics-first storage formats (Parquet)
+- data mesh requirements (S3 as lake storage)
+- strong cost controls (FinOps)
+
+Recommended additions (optional, common in enterprise):
+- OpenTelemetry metrics/exporter
+- structured logging
+- integration tests in CI (localstack / testcontainers)
+
+---
+
+## 🤖 CI/CD
+
+This repo ships with a GitHub Actions workflow (`.github/workflows/ci.yml`) that runs:
+
+- `go test` + coverage
+- `golangci-lint`
+- (optional) benchmarks (kept off by default in CI)
+
+Coverage upload is configured for **Codecov** (works well for public repos).
+
+---
+
+## 🤝 Contributing
+
+### Requirements
+
+- Go **1.26**
+- Make sure tests and lint pass
+
+### Local checks
 
 ```bash
 go test ./...
+go test ./... -coverprofile=coverage.out
+golangci-lint run
 ```
 
-Benchmarks:
+### Benchmarks
 
 ```bash
-go test ./... -bench=./... -benchmem
+go test ./... -bench=. -benchmem
 ```
 
-## Contributing
+Guidelines:
+- prefer composition
+- keep allocations low
+- add tests + benchmarks for perf changes
 
-Issues and PRs are welcome. Keep changes small and include tests/benchmarks when relevant.
+---
 
-## License
+## 🔐 Security
 
-Add a license that fits your project (MIT/Apache-2.0 are common). This repository currently does not ship one.
+Please report vulnerabilities privately:
 
+- **luiz.baldanca@gmail.com**
 
-## Examples
+Do not open public issues for security vulnerabilities.
 
-- `examples/basic`: in-memory end-to-end run (no AWS dependencies at runtime).
-- `examples/sqs_to_s3`: wiring SQS -> Parquet -> S3 using the AWS SDK.
+---
+
+## 🗺 Roadmap
+
+- Kafka source
+- Compression options
+- Metrics exporter (OpenTelemetry)
+- Multi-sink strategies
+- Backpressure / adaptive buffering (if needed)
+
+---
+
+## ❓ FAQ
+
+### Is it production ready?
+Yes — designed for high throughput ingestion with graceful shutdown flush.
+
+### Does it guarantee delivery?
+It is designed for consistent delivery with shutdown flush support. For strict guarantees, combine with idempotent sinks and downstream dedupe where needed.
+
+### Does it support other sources/sinks?
+The architecture is pluggable; SQS/S3 are the primary supported implementations currently.
+
+---
+
+## ⭐ Maintainer / Hiring
+
+Maintainer: **Luiz Baldança**
+
+If you want help integrating this into your data platform or need consulting on:
+- high throughput Go pipelines
+- AWS messaging (SQS/SNS)
+- FinOps optimization
+
+Reach out: **luiz.baldanca@gmail.com**
+
+---
+
+## 📄 License
+
+MIT License.

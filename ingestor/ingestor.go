@@ -156,13 +156,14 @@ func (i *Ingestor[iType]) Run(ctx context.Context, flushWorkers, flushQueue int)
 	i.maybeStartFlushPool(ctx)
 
 	for {
+		// If a flush worker failed, return immediately (graceful flush can't succeed if worker pool is poisoned).
 		if err := i.pollFlushErr(); err != nil {
 			return err
 		}
 
+		// Any stop condition: attempt final flush (graceful) before returning.
 		if ctx.Err() != nil {
-			// caller asked to stop: enter graceful shutdown window
-			return i.flushRemainingOnStop(ctx)
+			return i.flushRemainingOnStop(context.Background())
 		}
 
 		recvCtx := ctx
@@ -170,27 +171,31 @@ func (i *Ingestor[iType]) Run(ctx context.Context, flushWorkers, flushQueue int)
 		if deadline, ok := i.batcher.Deadline(); ok {
 			recvCtx, cancel = context.WithDeadline(ctx, deadline)
 		}
+
 		msg, err := i.source.Receive(recvCtx)
+
 		if cancel != nil {
 			cancel()
 		}
 
 		if err != nil {
+			// If the per-receive deadline fired, we flush the current batch.
+			// BUT if the main ctx is already done, we prefer the graceful shutdown path.
 			if errors.Is(err, context.DeadlineExceeded) {
+				if ctx.Err() != nil {
+					return i.flushRemainingOnStop(context.Background())
+				}
 				if err := i.flush(ctx); err != nil {
 					return err
 				}
 				continue
 			}
 
-			// Source returned canceled but Run ctx is still alive: treat as stop signal.
-			if errors.Is(err, context.Canceled) && ctx.Err() == nil {
-				return i.flushRemainingOnStop(ctx)
+			// Treat any cancellation as a stop signal and attempt a final flush.
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				return i.flushRemainingOnStop(context.Background())
 			}
 
-			if ctx.Err() != nil {
-				return i.flushRemainingOnStop(ctx)
-			}
 			return err
 		}
 
@@ -200,23 +205,25 @@ func (i *Ingestor[iType]) Run(ctx context.Context, flushWorkers, flushQueue int)
 		}
 		if flushNow {
 			if err := i.flush(ctx); err != nil {
+				// If ctx was canceled during flush trigger, still try final flush.
+				if ctx.Err() != nil {
+					return i.flushRemainingOnStop(context.Background())
+				}
 				return err
 			}
 		}
 	}
 }
 
-func (i *Ingestor[iType]) maybeStartFlushPool(_ context.Context) {
+func (i *Ingestor[iType]) maybeStartFlushPool(ctx context.Context) {
 	if i.flushWorkers <= 1 {
 		return
 	}
 
 	i.flushOnce.Do(func() {
-		// IMPORTANT:
-		// The flush workers MUST NOT be tied to Run(ctx) cancellation, otherwise a SIGTERM/cancel
-		// kills workers immediately and we can lose the final shutdown flush (exactly the failing test).
-		// We stop workers explicitly during graceful shutdown by closing flushJobs and calling flushCancel.
-		flushCtx, cancel := context.WithCancel(context.Background())
+		base := context.WithoutCancel(ctx)
+		flushCtx, cancel := context.WithCancel(base)
+
 		i.flushCancel = cancel
 
 		i.flushJobs = make(chan flushJob[iType], i.flushQueue)
@@ -408,96 +415,25 @@ func (i *Ingestor[iType]) startJobLease(parent context.Context, ext source.Visib
 	return cancel
 }
 
-// drainOnStop drains already-buffered messages quickly.
-// Since Source.Receive is blocking and there's no TryReceive in the interface,
-// we probe with a very small timeout; if it times out, we assume nothing is
-// immediately available and stop draining.
-func (i *Ingestor[iType]) drainOnStop(ctx context.Context) error {
-	const probeTimeout = 1 * time.Millisecond
-
-	for {
-		if err := i.pollFlushErr(); err != nil {
-			return err
-		}
-
-		recvCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-		msg, err := i.source.Receive(recvCtx)
-		cancel()
-
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				return nil
-			}
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-
-		flushNow, err := i.processMessage(ctx, msg)
-		if err != nil {
-			return err
-		}
-		if flushNow {
-			if err := i.flush(ctx); err != nil {
-				return err
-			}
-		}
-	}
-}
-
-// flushRemainingOnStop performs a graceful shutdown:
-//
-//  1. Creates a shutdown window derived from ctx BUT without cancellation,
-//     bounded by a timeout (so we don't hang forever).
-//  2. Drains already-buffered messages into the batcher.
-//  3. Performs the FINAL flush synchronously (never enqueue), guaranteeing write+ack.
-//  4. Then closes the flush pool and waits for in-flight jobs within the shutdown window.
 func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
-	// Keep values/deadline from ctx, but remove cancellation signal.
-	// This is "part of graceful": we stop ingesting because ctx canceled,
-	// then we finish in-flight work inside this bounded window.
+	// "Graceful flush": do not inherit cancellation from the caller.
+	// This ctx is expected to be Background() from Run(), but we keep this safe anyway.
 	base := context.WithoutCancel(ctx)
-
-	shutdownCtx, cancel := context.WithTimeout(base, 10*time.Second)
+	stopCtx, cancel := context.WithTimeout(base, 10*time.Second)
 	defer cancel()
 
-	// Drain any already-buffered messages quickly.
-	if err := i.drainOnStop(shutdownCtx); err != nil {
+	// Try one last flush (whatever is currently buffered).
+	if err := i.flush(stopCtx); err != nil {
 		return err
 	}
 
-	// FINAL flush MUST be synchronous (do not enqueue into pool),
-	// otherwise shutdown could return before workers process it.
-	if err := i.pollFlushErr(); err != nil {
-		return err
-	}
-
-	batch := i.batcher.Flush()
-	if len(batch.Items) > 0 {
-		key, err := i.keyFunc(shutdownCtx, batch)
-		if err != nil {
-			return err
-		}
-		if err := i.flushJob(shutdownCtx, flushJob[iType]{
-			key:   key,
-			items: batch.Items,
-			acks:  batch.Acks,
-		}); err != nil {
-			return err
-		}
-	}
-
-	// No pool: done.
+	// If no worker pool, we're done.
 	if i.flushJobs == nil || i.flushWorkers <= 1 {
 		return nil
 	}
 
-	// Close pool and wait any in-flight jobs.
+	// Drain/stop worker pool after ensuring the last flush was enqueued.
 	close(i.flushJobs)
-	if i.flushCancel != nil {
-		i.flushCancel()
-	}
 
 	done := make(chan struct{})
 	go func() {
@@ -510,8 +446,8 @@ func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
 		return err
 	case <-done:
 		return nil
-	case <-shutdownCtx.Done():
-		return shutdownCtx.Err()
+	case <-stopCtx.Done():
+		return stopCtx.Err()
 	}
 }
 

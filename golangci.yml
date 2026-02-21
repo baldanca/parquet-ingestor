@@ -1,0 +1,73 @@
+run:
+  timeout: 5m
+  tests: true
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters-settings:
+  govet:
+    enable-all: false
+  staticcheck:
+    checks: ["all"]
+  revive:
+    rules:
+      - name: var-naming
+      - name: package-comments
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: receiver-naming
+      - name: indent-error-flow
+      - name: early-return
+      - name: bare-return
+  gocritic:
+    enabled-checks:
+      - appendAssign
+      - captLocal
+      - caseOrder
+      - emptyStringTest
+      - ifElseChain
+      - nestingReduce
+      - rangeValCopy
+      - sliceClear
+      - sloppyReassign
+      - sprintf
+      - typeAssertChain
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - revive
+    - gocritic
+    - ineffassign
+    - typecheck
+    - unused
+    - bodyclose
+    - nilerr
+    - prealloc
+    - unconvert
+    - unparam
+    - whitespace
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+# Keep noise low on early-stage OSS; tighten later if you want.
+exclude-rules:
+  - path: _test\.go
+    linters:
+      - revive
+      - gocritic
+      - prealloc
+      - unparam
