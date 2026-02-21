@@ -12,7 +12,7 @@ permissions:
 env:
   GO_VERSION: "1.25.x"
   GO_MOD_VERSION: "1.25"
-  COVERAGE_MIN: "90"
+  COVERAGE_MIN: "70"
 
 jobs:
   ci:

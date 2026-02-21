@@ -1,60 +1,56 @@
 name: Benchmarks PR
 
 on:
-
-  workflow_dispatch:
-
+  workflow_dispatch: {}
   pull_request:
-    branches:
-      - develop
+    branches: [develop]
 
 permissions:
-  pull-requests: write
   contents: read
+  pull-requests: write
+
+env:
+  GO_VERSION: "1.25.x"
 
 jobs:
-
   bench:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.x"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Run benchmarks
-        id: bench
+        shell: bash
         run: |
+          set -euo pipefail
           go test ./... -bench=. -benchmem | tee bench.txt
 
       - name: Comment on PR
-        if: github.event_name == 'pull_request'
+        if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
 
-            const body = fs.readFileSync('bench.txt','utf8')
-              .split('\\n')
-              .slice(-200)
-              .join('\\n');
+            const raw = fs.readFileSync('bench.txt', 'utf8');
+            const lines = raw.split('\n');
+            const tail = lines.slice(Math.max(lines.length - 200, 0)).join('\n');
+
+            const body =
+              "## Benchmarks\n\n" +
+              "```\\n" +
+              tail +
+              "\\n```\\n\\n" +
+              "> Re-run: Workflow 'Benchmarks PR' or add label `run-bench` (if you use benchstat workflow).";
 
             await github.rest.issues.createComment({
-
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-
-              body:
-`## Benchmarks
-
-\`\`\`
-${body}
-\`\`\`
-`
-            })
+              body
+            });
