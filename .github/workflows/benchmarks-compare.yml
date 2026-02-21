@@ -11,10 +11,8 @@ permissions:
   pull-requests: write
 
 env:
-  GO_VERSION: "1.26.x"
+  GO_VERSION: "1.25.x"
   BENCH_ARGS: "./... -bench=. -benchmem -count=5"
-  # Limite simples: se benchstat mostrar "slower" / "higher" você decide manualmente.
-  # Para automatizar fail hard por % é possível, mas costuma dar falso-positivo.
 
 jobs:
   bench:
@@ -38,8 +36,7 @@ jobs:
 
       - name: Capture base SHA
         id: base
-        run: |
-          echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+        run: echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
 
       - name: Run benchmarks on BASE (develop)
         shell: bash
