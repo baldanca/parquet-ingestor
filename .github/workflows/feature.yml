@@ -32,13 +32,10 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          # IMPORTANTE: precisa ser >= versão que já vem buildada com Go >= 1.25
-          # se quebrar no futuro, sobe aqui (v1.66+ é o mínimo recomendado hoje)
-          version: v1.66.0
+          version: v2.1.0
           args: --timeout=5m
-          # cache do golangci (muito ganho em repo Go)
           skip-cache: false
 
   tests:
