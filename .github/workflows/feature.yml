@@ -128,7 +128,6 @@ jobs:
                 pull_number: pr.number,
                 title,
                 body,
-                draft: false,
               });
               return;
             }
