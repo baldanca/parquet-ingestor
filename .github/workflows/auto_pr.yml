@@ -16,11 +16,8 @@ concurrency:
 
 jobs:
   auto-pr:
-
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Verify token
         shell: bash
         run: |
@@ -31,16 +28,13 @@ jobs:
 
       - name: Create or update PR
         shell: bash
-
         env:
           GH_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
-
         run: |
           set -euo pipefail
-
           echo "Branch: $BRANCH"
 
           if [[ "$BRANCH" != feat/* && "$BRANCH" != feature/* ]]; then
@@ -48,17 +42,23 @@ jobs:
             exit 0
           fi
 
-          gh api repos/$REPO/branches/develop >/dev/null
+          gh api "repos/$REPO/branches/develop" >/dev/null
 
           TITLE="feat: ${BRANCH} -> develop"
 
-          cat > pr_body.txt <<EOF
-This PR was automatically created by CI.
+          cat > pr_body.txt <<'EOF'
+          This PR was automatically created by CI.
+          Check failure on line 56 in .github/workflows/auto_pr.yml
 
-Source: ${BRANCH}
-Target: develop
+          GitHub Actions
+          / .github/workflows/auto_pr.yml
+          Invalid workflow file
 
-EOF
+          You have an error in your yaml syntax on line 56
+
+          Source: ${BRANCH}
+          Target: develop
+          EOF
 
           EXISTING=$(gh pr list \
             --repo "$REPO" \
@@ -70,17 +70,14 @@ EOF
 
           if [[ -n "$EXISTING" ]]; then
             echo "Updating PR #$EXISTING"
-
             gh pr edit "$EXISTING" \
               --repo "$REPO" \
               --title "$TITLE" \
               --body-file pr_body.txt
-
             exit 0
           fi
 
           echo "Creating PR"
-
           gh pr create \
             --repo "$REPO" \
             --base develop \
