@@ -140,7 +140,7 @@ jobs:
               base,
               title,
               body,
-              draft: true,
+              draft: false,
             });
 
             core.info(`Created PR #${created.data.number} (${created.data.html_url})`);
