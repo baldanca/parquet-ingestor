@@ -7,75 +7,29 @@ on:
       - "feature/**"
 
 permissions:
-  contents: read
   pull-requests: write
-
-concurrency:
-  group: auto-pr-${{ github.ref_name }}
-  cancel-in-progress: true
+  contents: read
 
 jobs:
   auto-pr:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Ensure target branch exists (develop)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          git ls-remote --exit-code https://github.com/${{ github.repository }}.git refs/heads/develop >/dev/null
+      - name: Create or update PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.AUTO_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          base: develop
+          branch: ${{ github.ref_name }}
+          title: "feat: ${{ github.ref_name }} → develop"
+          body: |
+            Auto PR created by workflow.
 
-      - name: Create or update PR to develop
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-          ACTOR: ${{ github.actor }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Skip if someone pushes directly to develop/main by mistake (extra safety)
-          if [[ "$BRANCH" == "develop" || "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
-            echo "Branch $BRANCH is not a feature branch. Skipping."
-            exit 0
-          fi
-
-          # Check if an open PR already exists from this head branch to develop
-          existing_number=$(gh pr list             --repo "$REPO"             --state open             --base develop             --head "$BRANCH"             --json number             --jq '.[0].number // empty')
-
-          title="feat: $BRANCH → develop"
-          body=$'This PR was automatically created/maintained by CI.\n\n'$'- **Source**: `'"$BRANCH"'`\n'$'- **Target**: `develop`\n\n'$'Notes:\n'$'- Pushes to this branch will keep this PR updated.\n'$'- This PR is created as **Draft** by default. It can be marked ready after CI is green.\n'
-
-          if [[ -n "${existing_number:-}" ]]; then
-            echo "PR already exists: #$existing_number. Ensuring metadata..."
-            gh pr edit "$existing_number"               --repo "$REPO"               --title "$title"               --body "$body"               --add-label "feature"               --add-label "auto-pr"               --add-assignee "$ACTOR" || true
-
-            # Optional reviewers via repo variable AUTO_PR_REVIEWERS="user1,user2"
-            if [[ -n "${AUTO_PR_REVIEWERS:-}" ]]; then
-              IFS=',' read -ra reviewers <<< "$AUTO_PR_REVIEWERS"
-              for r in "${reviewers[@]}"; do
-                rr="$(echo "$r" | xargs)"
-                [[ -n "$rr" ]] && gh pr edit "$existing_number" --repo "$REPO" --add-reviewer "$rr" || true
-              done
-            fi
-
-            echo "Done."
-            exit 0
-          fi
-
-          echo "No PR found. Creating a new Draft PR..."
-          pr_url=$(gh pr create             --repo "$REPO"             --base develop             --head "$BRANCH"             --title "$title"             --body "$body"             --draft             --label "feature"             --label "auto-pr"             --assignee "$ACTOR")
-
-          echo "Created PR: $pr_url"
-
-          # Optional reviewers via repo variable AUTO_PR_REVIEWERS="user1,user2"
-          if [[ -n "${AUTO_PR_REVIEWERS:-}" ]]; then
-            pr_number=$(echo "$pr_url" | awk -F/ '{print $NF}')
-            IFS=',' read -ra reviewers <<< "$AUTO_PR_REVIEWERS"
-            for r in "${reviewers[@]}"; do
-              rr="$(echo "$r" | xargs)"
-              [[ -n "$rr" ]] && gh pr edit "$pr_number" --repo "$REPO" --add-reviewer "$rr" || true
-            done
-          fi
+            Source: `${{ github.ref_name }}`
+            Target: develop
+          draft: true
+          labels: |
+            feature
+            auto-pr
+          assignees: |
+            ${{ github.actor }}

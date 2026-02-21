@@ -1,76 +1,76 @@
 name: CI
 
 on:
-  push:
-    branches: [ "main", "master" ]
   pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: {}
+    branches:
+      - develop
+
+  push:
+    branches:
+      - develop
 
 permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.26.x"
+  GO_VERSION: "1.25.x"
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Download dependencies
+      - name: Download deps
         run: go mod download
 
-      - name: Run tests
+      - name: Run Tests
         run: go test ./... -race
 
-      - name: Build (sanity)
+      - name: Build check
         run: go test ./... -c
         shell: bash
 
   coverage-and-lint:
-    name: Coverage + Lint (ubuntu)
+    needs: test
+
     runs-on: ubuntu-latest
-    needs: [test]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Run tests (with coverage)
+      - name: Coverage
         run: |
-          go test ./... -race -coverprofile=coverage.out -covermode=atomic
+          go test ./... \
+          -race \
+          -coverprofile=coverage.out \
+          -covermode=atomic
 
-      - name: Upload coverage artifact
+      - name: Upload Coverage Artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage
           path: coverage.out
 
-      - name: Upload to Codecov (public repos usually don't need token)
+      - name: Upload Codecov
         uses: codecov/codecov-action@v5
         with:
           files: coverage.out
@@ -81,36 +81,3 @@ jobs:
         with:
           version: latest
           args: --timeout=5m
-
-  benchmarks:
-    name: Benchmarks (ubuntu, optional)
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Run benchmarks
-        shell: bash
-        run: |
-          set -euo pipefail
-          go test ./... -bench=. -benchmem | tee bench.txt
-          {
-            echo "## Benchmark Results"
-            echo ""
-            echo "\`\`\`"
-            tail -n 200 bench.txt
-            echo "\`\`\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload benchmark artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmarks
-          path: bench.txt
