@@ -113,8 +113,12 @@ func main() {
 
 	if *jsonOut {
 
-		fmt.Printf(`{"coverage":%.2f}`+"\n", overall)
+		fmt.Printf(
+			`{"coverage":%.2f}`,
+			overall,
+		)
 
+		return
 	}
 
 	fmt.Printf(
