@@ -163,6 +163,99 @@ func TestAckGroup_Clear_EmptiesButReusesCapacity(t *testing.T) {
 	}
 }
 
+func TestAckGroup_Commit_EmptyGroup_NoCalls(t *testing.T) {
+	var g AckGroup
+	src := &fakeSrc{}
+
+	if err := g.Commit(context.Background(), src); err != nil {
+		t.Fatalf("Commit on empty group returned error: %v", err)
+	}
+	if src.ackCalls != 0 || src.ackMetaCalls != 0 {
+		t.Fatalf("expected no ack calls, got ackCalls=%d ackMetaCalls=%d", src.ackCalls, src.ackMetaCalls)
+	}
+}
+
+func TestAckGroup_TrimTo_TargetCapZero_NilsSlices(t *testing.T) {
+	var g AckGroup
+	g.Add(testMsg{id: "1", handle: "h-1", metaOK: true})
+
+	g.TrimTo(0)
+
+	if g.msgs != nil {
+		t.Fatalf("expected msgs to be nil when targetCap<=0")
+	}
+	if g.metas != nil {
+		t.Fatalf("expected metas to be nil when targetCap<=0")
+	}
+}
+
+func TestAckGroup_TrimTo_ShrinksBackingArraysWhenTooLarge(t *testing.T) {
+	var g AckGroup
+	g.msgs = make([]Message, 0, 100)
+	g.metas = make([]AckMetadata, 0, 100)
+
+	// Trigger shrink: cap > targetCap*3
+	g.TrimTo(10)
+
+	if cap(g.msgs) != 10 {
+		t.Fatalf("expected msgs cap=10, got %d", cap(g.msgs))
+	}
+	if cap(g.metas) != 10 {
+		t.Fatalf("expected metas cap=10, got %d", cap(g.metas))
+	}
+	if len(g.msgs) != 0 || len(g.metas) != 0 {
+		t.Fatalf("expected lens to remain 0, got msgs=%d metas=%d", len(g.msgs), len(g.metas))
+	}
+}
+
+func TestAckGroup_Snapshot_DeepCopiesSlices(t *testing.T) {
+	var g AckGroup
+	g.Add(testMsg{id: "1", handle: "h-1", metaOK: true})
+	g.Add(testMsg{id: "2", handle: "h-2", metaOK: true})
+
+	snap := g.Snapshot()
+
+	if len(snap.msgs) != 2 || len(snap.metas) != 2 {
+		t.Fatalf("unexpected snapshot lengths: msgs=%d metas=%d", len(snap.msgs), len(snap.metas))
+	}
+
+	// Mutate original backing array; snapshot must not change.
+	g.msgs[0] = testMsg{id: "Z"}
+	g.metas[0] = AckMetadata{ID: "Z", Handle: "H"}
+
+	if m := snap.msgs[0].(testMsg); m.id != "1" {
+		t.Fatalf("snapshot msgs[0] mutated: got %q want %q", m.id, "1")
+	}
+	if snap.metas[0].ID != "1" || snap.metas[0].Handle != "h-1" {
+		t.Fatalf("snapshot metas[0] mutated: got %+v want {ID:1 Handle:h-1}", snap.metas[0])
+	}
+}
+
+func TestAckGroup_Snapshot_EmptyReturnsNilSlices(t *testing.T) {
+	var g AckGroup
+	snap := g.Snapshot()
+	if snap.msgs != nil {
+		t.Fatalf("expected nil msgs slice on empty snapshot")
+	}
+	if snap.metas != nil {
+		t.Fatalf("expected nil metas slice on empty snapshot")
+	}
+}
+
+func TestAckGroup_Metas_ReturnsCollectedMetas(t *testing.T) {
+	var g AckGroup
+	g.Add(testMsg{id: "1", handle: "h-1", metaOK: true})
+	g.Add(testMsg{id: "2", handle: "h-2", metaOK: true})
+
+	metas := g.Metas()
+	if len(metas) != 2 {
+		t.Fatalf("expected 2 metas, got %d", len(metas))
+	}
+	if metas[0].ID != "1" || metas[1].ID != "2" {
+		t.Fatalf("unexpected metas: %+v", metas)
+	}
+}
+
 type big1k struct{ _ [1024]byte }
 type big4k struct{ _ [4096]byte }
 

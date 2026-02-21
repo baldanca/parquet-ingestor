@@ -57,7 +57,6 @@ jobs:
 
           if [ -f .covignore ]; then
             echo "Applying .covignore rules..."
-
             while IFS= read -r ignore; do
               [ -z "$ignore" ] && continue
               PKGS=$(echo "$PKGS" | grep -v "$ignore" || true)
@@ -69,14 +68,16 @@ jobs:
 
           go test $PKGS -coverprofile=coverage.out
 
+          echo ""
+          go run ./tools/coverrank -coverprofile=coverage.out -top 30
+          echo ""
+
           go tool cover -func=coverage.out | tail -n 1 | tee coverage.txt
 
           pct=$(awk '{print $3}' coverage.txt | tr -d '%')
-
           echo "Total coverage: $pct%"
 
           threshold=70.0
-
           awk -v p="$pct" -v t="$threshold" 'BEGIN { exit !(p+0 >= t+0) }' || {
             echo "Coverage $pct% is below threshold $threshold%"
             exit 1
