@@ -1,4 +1,4 @@
-name: Auto PR (feature → develop)
+name: Auto PR (feature -> develop)
 
 on:
   push:
@@ -19,8 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify token
+        shell: bash
         run: |
-          if [ -z "${{ secrets.AUTO_PR_TOKEN }}" ]; then
+          set -euo pipefail
+          if [[ -z "${{ secrets.AUTO_PR_TOKEN }}" ]]; then
             echo "Missing secret AUTO_PR_TOKEN (PAT)."
             echo "Create a PAT and add it as repo secret AUTO_PR_TOKEN."
             exit 1
@@ -37,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Sanity: only feature branches
+          # Only feature branches (extra safety)
           if [[ "$BRANCH" != feat/* && "$BRANCH" != feature/* ]]; then
             echo "Not a feature branch: $BRANCH. Skipping."
             exit 0
@@ -46,22 +48,29 @@ jobs:
           # Ensure develop exists
           gh api "repos/$REPO/branches/develop" >/dev/null
 
-          # Check existing PR
-          existing=$(gh pr list \
+          # PR title/body (avoid YAML/encoding issues)
+          title="feat: ${BRANCH} -> develop"
+
+          body="$(cat <<EOF
+This PR was automatically created/maintained by CI.
+
+- Source: \`${BRANCH}\`
+- Target: \`develop\`
+
+Notes:
+- Pushes to this branch keep this PR up to date.
+- PR is created as Draft by default; mark Ready when CI is green.
+EOF
+)"
+
+          # Check if an open PR already exists
+          existing="$(gh pr list \
             --repo "$REPO" \
             --state open \
             --base develop \
             --head "$BRANCH" \
             --json number \
-            --jq '.[0].number // empty')
-
-          title="feat: $BRANCH → develop"
-          body=$'This PR was automatically created/maintained by CI.\n\n'\
-$'- **Source**: `'"$BRANCH"'`\n'\
-$'- **Target**: `develop`\n\n'\
-$'Notes:\n'\
-$'- Pushes to this branch keep this PR up to date.\n'\
-$'- PR is **Draft** by default; it can be marked Ready after CI is green.\n'
+            --jq '.[0].number // empty')"
 
           if [[ -n "${existing:-}" ]]; then
             echo "PR exists: #$existing. Updating metadata..."
@@ -86,15 +95,15 @@ $'- PR is **Draft** by default; it can be marked Ready after CI is green.\n'
           fi
 
           echo "No PR found. Creating Draft PR..."
-          pr_url=$(gh pr create \
+          pr_url="$(gh pr create \
             --repo "$REPO" \
             --base develop \
             --head "$BRANCH" \
             --title "$title" \
             --body "$body" \
-            --draft)
+            --draft)"
 
-          pr_number=$(echo "$pr_url" | awk -F/ '{print $NF}')
+          pr_number="$(echo "$pr_url" | awk -F/ '{print $NF}')"
 
           gh pr edit "$pr_number" \
             --repo "$REPO" \
