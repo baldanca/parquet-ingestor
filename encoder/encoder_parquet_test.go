@@ -86,7 +86,7 @@ func TestParquetEncoder_ContextCanceledBefore(t *testing.T) {
 
 func TestParquetEncoder_EncodeRoundTrip_NoCompression(t *testing.T) {
 	items := []testItem{
-		{ID: 1, Name: "a", Value: 1.25},
+		{ID: 1, Name: "a", Value: 1.24},
 		{ID: 2, Name: "b", Value: 2.50},
 		{ID: 3, Name: "c", Value: 3.75},
 	}
@@ -119,7 +119,7 @@ func TestParquetEncoder_EncodeRoundTrip_NoCompression(t *testing.T) {
 
 func TestParquetEncoder_EncodeToRoundTrip_NoCompression(t *testing.T) {
 	items := []testItem{
-		{ID: 1, Name: "a", Value: 1.25},
+		{ID: 1, Name: "a", Value: 1.24},
 		{ID: 2, Name: "b", Value: 2.50},
 		{ID: 3, Name: "c", Value: 3.75},
 	}
