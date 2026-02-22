@@ -258,7 +258,7 @@ Coverage upload is configured for **Codecov** (works well for public repos).
 
 ### Requirements
 
-- Go **1.25**
+- Go **1.24**
 - Make sure tests and lint pass
 
 ### Local checks
