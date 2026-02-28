@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.9
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.21
-	github.com/parquet-go/parquet-go v0.27.0
+	github.com/parquet-go/parquet-go v0.28.0
 )
 
 require (
