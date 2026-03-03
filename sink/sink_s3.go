@@ -8,18 +8,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
-
-type s3API interface {
-	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
-}
 
 // S3Sink uploads objects to Amazon S3.
 //
 // It supports both buffered (Write) and streaming (WriteStream) uploads.
 type S3Sink struct {
-	client s3API
+	client  transfermanager.S3APIClient
+	manager *transfermanager.Client
 
 	bucket    string
 	bucketPtr *string
@@ -34,7 +32,7 @@ type Sink = S3Sink
 // NewSinkS3 creates an S3 sink that uploads to the given bucket and optional prefix.
 //
 // Prefix is joined with the request key using a single '/' separator.
-func NewSinkS3(client s3API, bucket, prefix string) *S3Sink {
+func NewSinkS3(client transfermanager.S3APIClient, bucket, prefix string) *S3Sink {
 	if client == nil {
 		panic("s3 client is required")
 	}
@@ -43,9 +41,10 @@ func NewSinkS3(client s3API, bucket, prefix string) *S3Sink {
 	}
 
 	s := &S3Sink{
-		client: client,
-		bucket: bucket,
-		prefix: strings.Trim(prefix, "/"),
+		client:  client,
+		manager: transfermanager.New(client),
+		bucket:  bucket,
+		prefix:  strings.Trim(prefix, "/"),
 	}
 	s.bucketPtr = &s.bucket
 
@@ -96,19 +95,8 @@ func (s *S3Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error 
 		return fmt.Errorf("writer is nil")
 	}
 
-	sc := s.pool.Get().(*putScratch)
-	defer s.pool.Put(sc)
-
 	key := trimLeftSlashes(req.Key)
-	sc.key = joinPrefix(s.prefix, key, &sc.sb)
-
-	if req.ContentType != "" {
-		sc.ct = req.ContentType
-		sc.in.ContentType = &sc.ct
-	} else {
-		sc.ct = ""
-		sc.in.ContentType = nil
-	}
+	fullKey := joinPrefix(s.prefix, key, &strings.Builder{})
 
 	pr, pw := io.Pipe()
 	defer func() { _ = pr.Close() }()
@@ -120,21 +108,25 @@ func (s *S3Sink) WriteStream(ctx context.Context, req StreamWriteRequest) error 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := req.Writer.Write(pw)
-		werr = err
-		_ = pw.CloseWithError(err)
+		werr = req.Writer.Write(pw)
+		_ = pw.CloseWithError(werr)
 	}()
 
-	sc.in.Bucket = s.bucketPtr
-	sc.in.Key = &sc.key
-	sc.in.Body = pr
-	sc.in.ContentLength = nil
+	in := &transfermanager.UploadObjectInput{
+		Bucket: s.bucketPtr,
+		Key:    &fullKey,
+		Body:   pr,
+	}
+	if req.ContentType != "" {
+		ct := req.ContentType
+		in.ContentType = &ct
+	}
 
-	_, err := s.client.PutObject(ctx, &sc.in)
+	_, err := s.manager.UploadObject(ctx, in)
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		wg.Wait()
-		return fmt.Errorf("put s3 object key=%q: %w", key, err)
+		return fmt.Errorf("upload s3 object key=%q: %w", key, err)
 	}
 
 	wg.Wait()
