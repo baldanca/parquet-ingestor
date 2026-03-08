@@ -169,7 +169,7 @@ func TestIntegration_Ingestor_Streaming_EndToEnd(t *testing.T) {
 		ReuseBuffers:           true,
 	}
 
-	ing, err := ingestor.NewIngestor(
+	ing, err := ingestor.NewIngestor[testItem](
 		cfg,
 		src,
 		jsonTransformer{},
@@ -230,7 +230,7 @@ func TestIntegration_Ingestor_Fallback_EncodeThenWrite(t *testing.T) {
 		ReuseBuffers:           true,
 	}
 
-	ing, err := ingestor.NewIngestor(
+	ing, err := ingestor.NewIngestor[testItem](
 		cfg,
 		src,
 		jsonTransformer{},
@@ -318,7 +318,7 @@ func TestIntegration_Ingestor_DoesNotAckIfSinkFails(t *testing.T) {
 
 	keyFunc := func(ctx context.Context, b batcher.Batch[testItem]) (string, error) { return "k", nil }
 
-	ig, err := ingestor.NewIngestor(bcfg, src, jsonTransformer{}, enc, sk, keyFunc)
+	ig, err := ingestor.NewIngestor[testItem](bcfg, src, jsonTransformer{}, enc, sk, keyFunc)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
