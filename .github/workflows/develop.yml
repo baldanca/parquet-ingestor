@@ -195,6 +195,8 @@ jobs:
           cache: true
 
       - name: go bench
+        env:
+          PARQUET_INGESTOR_BENCH_PROFILE: ci
         run: |
           set -euo pipefail
           go test ./... -bench=./... -benchmem

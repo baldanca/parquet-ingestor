@@ -305,3 +305,18 @@ If adaptive runtime is disabled, the project behaves like a manually tuned inges
 - additional metric adapters
 - more source-specific control heuristics
 - richer backpressure controls for pull-based queues
+
+## Benchmark profiles
+
+Benchmarks support two profiles:
+
+- `full`: default outside CI. Runs the full benchmark matrix.
+- `ci`: enabled automatically when `CI` or `GITHUB_ACTIONS` is set, or explicitly with `PARQUET_INGESTOR_BENCH_PROFILE=ci`. Runs a reduced benchmark matrix to keep CI fast and deterministic.
+
+Examples:
+
+```bash
+go test ./... -bench=./... -benchmem
+PARQUET_INGESTOR_BENCH_PROFILE=full go test ./... -bench=./... -benchmem
+PARQUET_INGESTOR_BENCH_PROFILE=ci go test ./... -bench=./... -benchmem
+```
