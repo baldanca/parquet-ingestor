@@ -13,7 +13,6 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
-
 func benchSourceAckSizes() []int {
 	if testing.Short() {
 		return []int{100, 1000}

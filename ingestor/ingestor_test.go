@@ -192,7 +192,7 @@ func TestIngestor_processMessage_TransformerFail_CallsFail(t *testing.T) {
 	cfg.FlushInterval = 10 * time.Second
 	cfg.MaxEstimatedInputBytes = 1024
 
-	ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
+	ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestIngestor_flush_UsesStreaming_WhenAvailable(t *testing.T) {
 	sk := &tSink{}
 	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
 
-	ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
+	ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestIngestor_flush_Fallback_WhenSinkNotStream(t *testing.T) {
 	sk := &tSinkOnly{}
 	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
 
-	ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
+	ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestIngestor_flush_RetriesWriteAndAck(t *testing.T) {
 
 	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
 
-	ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
+	ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
@@ -473,7 +473,6 @@ func makeMsgs(n int) []*bMsg {
 	return msgs
 }
 
-
 func benchIngestorSizes() []int {
 	if testing.Short() {
 		return []int{10, 100}
@@ -493,7 +492,7 @@ func BenchmarkIngestor_FlushOnly_Fallback(b *testing.B) {
 			sk := &bSink{}
 			keyFn := func(ctx context.Context, bb batcher.Batch[int]) (string, error) { return "k", nil }
 
-			ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
+			ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
 			if err != nil {
 				b.Fatalf("NewIngestor: %v", err)
 			}
@@ -528,7 +527,7 @@ func BenchmarkIngestor_FlushOnly_Streaming(b *testing.B) {
 			sk := &bStreamSink{}
 			keyFn := func(ctx context.Context, bb batcher.Batch[int]) (string, error) { return "k", nil }
 
-			ing, err := NewIngestor[int](cfg, src, tr, enc, sk, keyFn)
+			ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
 			if err != nil {
 				b.Fatalf("NewIngestor: %v", err)
 			}
@@ -575,7 +574,7 @@ func TestIngestor_flush_KeyFuncError_DoesNotAckAndReturnsError(t *testing.T) {
 		return "", keyErr
 	}
 
-	ig, err := NewIngestor[int](bcfg, src, tr, enc, sk, keyFunc)
+	ig, err := NewIngestor(bcfg, src, tr, enc, sk, keyFunc)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
@@ -641,7 +640,7 @@ func TestIngestor_flush_Streaming_RetriesWhenEncodeToFails(t *testing.T) {
 
 	keyFunc := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
 
-	ig, err := NewIngestor[int](bcfg, src, tr, enc, sk, keyFunc)
+	ig, err := NewIngestor(bcfg, src, tr, enc, sk, keyFunc)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}
@@ -686,7 +685,7 @@ func TestIngestor_Run_Cancel_FlushesRemainingBatch(t *testing.T) {
 
 	keyFunc := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
 
-	ig, err := NewIngestor[int](bcfg, src, tr, enc, sk, keyFunc)
+	ig, err := NewIngestor(bcfg, src, tr, enc, sk, keyFunc)
 	if err != nil {
 		t.Fatalf("NewIngestor: %v", err)
 	}

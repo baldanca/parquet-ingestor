@@ -320,7 +320,6 @@ func benchmarkAckGroupClear(b *testing.B, n int, withNil bool) {
 	}
 }
 
-
 func benchAckGroupSizes() []int {
 	if testing.Short() {
 		return []int{100, 1000}

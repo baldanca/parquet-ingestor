@@ -274,7 +274,6 @@ func benchmarkParquetEncodeToDiscard(b *testing.B, n int, compression ParquetCom
 	}
 }
 
-
 func benchEncoderSizes() []int {
 	if testing.Short() {
 		return []int{10, 100}

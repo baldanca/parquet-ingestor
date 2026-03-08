@@ -90,7 +90,7 @@ func BenchmarkIntegration_Ingestor_Streaming(b *testing.B) {
 		ctx, cancel := context.WithCancel(context.Background())
 		src := &benchSource{msgs: msgs, done: make(chan struct{})}
 
-		ing, err := ingestor.NewIngestor[testItem](
+		ing, err := ingestor.NewIngestor(
 			cfg,
 			src,
 			jsonTransformer{},

@@ -465,7 +465,6 @@ func TestSink_WriteStream_PropagatesWriterError(t *testing.T) {
 	}
 }
 
-
 func benchSinkSizes() []int {
 	if testing.Short() {
 		return []int{0, 128, 1024}
