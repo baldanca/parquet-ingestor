@@ -47,7 +47,6 @@ type Ingestor[iType any] struct {
 
 	batcher *batcher.Batcher[iType]
 
-	flushOnce    sync.Once
 	flushJobs    chan flushJob[iType]
 	flushErrCh   chan error
 	flushCancel  context.CancelFunc
@@ -400,8 +399,6 @@ func (i *Ingestor[iType]) flushWorker(ctx context.Context) {
 		}
 	}
 }
-
-func (i *Ingestor[iType]) pollFlushErr() error { return nil }
 
 func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message) (flushNow bool, err error) {
 	env := msg.Data()
