@@ -51,7 +51,11 @@ func (s blackholeSink) WriteStream(ctx context.Context, req sink.StreamWriteRequ
 }
 
 func BenchmarkIntegration_Ingestor_Streaming(b *testing.B) {
-	const batchItems = 1000
+	if testing.Short() {
+		b.Skip("skipping heavy integration benchmark in short mode")
+	}
+
+	batchItems := 1000
 
 	enc := encoder.ParquetEncoder[testItem]{Compression: "snappy"}
 

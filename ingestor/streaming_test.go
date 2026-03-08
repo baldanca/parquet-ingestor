@@ -86,7 +86,7 @@ var _ encoder.Encoder[int] = (*fakeEncNoStream[int])(nil)
 func TestTryStreamWrite_StreamedFalse_WhenEncoderNotStream(t *testing.T) {
 	enc := fakeEncNoStream[int]{ct: "application/x", ext: ".x"}
 	sk := &fakeSink{}
-	streamed, err := tryStreamWrite[int](context.Background(), &enc, sk, nopRetry{}, "k", []int{1, 2})
+	streamed, err := tryStreamWrite(context.Background(), &enc, sk, nopRetry{}, "k", []int{1, 2})
 	if streamed {
 		t.Fatalf("expected streamed=false")
 	}
@@ -98,7 +98,7 @@ func TestTryStreamWrite_StreamedFalse_WhenEncoderNotStream(t *testing.T) {
 func TestTryStreamWrite_StreamedFalse_WhenSinkNotStream(t *testing.T) {
 	enc := &fakeEnc[int]{ct: "application/x", ext: ".x"}
 	sk := &fakeSinkNoStream{}
-	streamed, err := tryStreamWrite[int](context.Background(), enc, sk, nopRetry{}, "k", []int{1, 2})
+	streamed, err := tryStreamWrite(context.Background(), enc, sk, nopRetry{}, "k", []int{1, 2})
 	if streamed {
 		t.Fatalf("expected streamed=false")
 	}
@@ -110,7 +110,7 @@ func TestTryStreamWrite_StreamedFalse_WhenSinkNotStream(t *testing.T) {
 func TestTryStreamWrite_UsesEncoderContentType(t *testing.T) {
 	enc := &fakeEnc[int]{ct: "application/vnd.apache.parquet", ext: ".parquet"}
 	sk := &fakeSink{}
-	streamed, err := tryStreamWrite[int](context.Background(), enc, sk, nopRetry{}, "key-1", []int{1, 2, 3})
+	streamed, err := tryStreamWrite(context.Background(), enc, sk, nopRetry{}, "key-1", []int{1, 2, 3})
 	if !streamed {
 		t.Fatalf("expected streamed=true")
 	}
@@ -134,7 +134,7 @@ func TestTryStreamWrite_UsesEncoderContentType(t *testing.T) {
 func TestTryStreamWrite_FallbackContentType_WhenEmpty(t *testing.T) {
 	enc := &fakeEnc[int]{ct: "", ext: ".bin"}
 	sk := &fakeSink{}
-	streamed, err := tryStreamWrite[int](context.Background(), enc, sk, nopRetry{}, "k", []int{1})
+	streamed, err := tryStreamWrite(context.Background(), enc, sk, nopRetry{}, "k", []int{1})
 	if !streamed {
 		t.Fatalf("expected streamed=true")
 	}
@@ -152,7 +152,7 @@ func TestTryStreamWrite_RetryIsUsed(t *testing.T) {
 
 	r := SimpleRetry{Attempts: 5, BaseDelay: 1, MaxDelay: 1, Jitter: false}
 
-	streamed, err := tryStreamWrite[int](context.Background(), enc, sk, r, "k", []int{1, 2})
+	streamed, err := tryStreamWrite(context.Background(), enc, sk, r, "k", []int{1, 2})
 	if !streamed {
 		t.Fatalf("expected streamed=true")
 	}
@@ -200,7 +200,7 @@ func BenchmarkTryStreamWrite(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, err := tryStreamWrite[int](ctx, enc, sk, nopRetry{}, "k", items)
+		_, err := tryStreamWrite(ctx, enc, sk, nopRetry{}, "k", items)
 		if err != nil {
 			b.Fatalf("err: %v", err)
 		}

@@ -13,8 +13,22 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
+func sourceAckBenchSizes() []int {
+	if testing.Short() {
+		return []int{100, 1000}
+	}
+	return []int{100, 1000, 5000}
+}
+
+func sourceReceiveBenchSizes() []int {
+	if testing.Short() {
+		return []int{1, 4}
+	}
+	return []int{1, 10}
+}
+
 func BenchmarkSourceSQS_AckBatchMeta(b *testing.B) {
-	for _, n := range []int{100, 1000, 5000} {
+	for _, n := range sourceAckBenchSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			f := &fakeSQSNoCapture{}
 
@@ -41,7 +55,7 @@ func BenchmarkSourceSQS_AckBatchMeta(b *testing.B) {
 }
 
 func BenchmarkSourceSQS_Receive(b *testing.B) {
-	for _, batch := range []int{1, 10} {
+	for _, batch := range sourceReceiveBenchSizes() {
 		b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
 			f := newFakeSQSAPI(1024)
 
@@ -111,7 +125,7 @@ func BenchmarkSourceSQS_Fail(b *testing.B) {
 }
 
 func BenchmarkSourceSQS_AckBatchMeta_NoCapture_Parallel(b *testing.B) {
-	for _, n := range []int{100, 1000, 5000} {
+	for _, n := range sourceAckBenchSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			f := &fakeSQSNoCapture{}
 
