@@ -465,8 +465,15 @@ func TestSink_WriteStream_PropagatesWriterError(t *testing.T) {
 	}
 }
 
+func benchSinkSizes() []int {
+	if testing.Short() {
+		return []int{0, 128, 1024}
+	}
+	return []int{0, 128, 1024, 16 * 1024, 256 * 1024}
+}
+
 func BenchmarkSink_Write_NoCapture(b *testing.B) {
-	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+	for _, size := range benchSinkSizes() {
 		b.Run(fmt.Sprintf("size=%s", strconv.Itoa(size)), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
 			s := NewSinkS3(f, "bkt", "pfx")
@@ -486,7 +493,7 @@ func BenchmarkSink_Write_NoCapture(b *testing.B) {
 }
 
 func BenchmarkSink_Write_NoCapture_Parallel_StaticKey(b *testing.B) {
-	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+	for _, size := range benchSinkSizes() {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
 			s := NewSinkS3(f, "bkt", "pfx")
@@ -516,7 +523,7 @@ func BenchmarkSink_Write_NoCapture_Parallel_PrecomputedKeys(b *testing.B) {
 	}
 	mask := uint64(keyCount - 1)
 
-	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+	for _, size := range benchSinkSizes() {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
 			s := NewSinkS3(f, "bkt", "pfx")
@@ -541,7 +548,7 @@ func BenchmarkSink_Write_NoCapture_Parallel_PrecomputedKeys(b *testing.B) {
 }
 
 func BenchmarkSink_WriteStream_NoCapture(b *testing.B) {
-	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+	for _, size := range benchSinkSizes() {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
 			s := NewSinkS3(f, "bkt", "pfx")
@@ -567,7 +574,7 @@ func BenchmarkSink_WriteStream_NoCapture(b *testing.B) {
 }
 
 func BenchmarkSink_WriteStream_Parallel(b *testing.B) {
-	for _, size := range []int{0, 128, 1024, 16 * 1024, 256 * 1024} {
+	for _, size := range benchSinkSizes() {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			f := &fakeS3NoCapture{}
 			s := NewSinkS3(f, "bkt", "pfx")
