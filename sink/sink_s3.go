@@ -157,6 +157,13 @@ func joinPrefix(prefix, key string, b *strings.Builder) string {
 	return b.String()
 }
 
+// ResolvePath returns the fully-qualified S3 object path for the given key.
+func (s *S3Sink) ResolvePath(key string) string {
+	cleanKey := trimLeftSlashes(key)
+	fullKey := joinPrefix(s.prefix, cleanKey, &strings.Builder{})
+	return "s3://" + s.bucket + "/" + fullKey
+}
+
 func trimLeftSlashes(s string) string {
 	for len(s) > 0 && s[0] == '/' {
 		s = s[1:]
