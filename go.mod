@@ -1,6 +1,6 @@
 module github.com/baldanca/parquet-ingestor
 
-go 1.23.2
+go 1.24.9
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.2
@@ -8,11 +8,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.1.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.2
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.22
-	github.com/parquet-go/parquet-go v0.25.1
+	github.com/parquet-go/parquet-go v0.28.0
 )
 
 require (
-	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.5 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.10 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.18 // indirect
@@ -31,6 +31,10 @@ require (
 	github.com/aws/smithy-go v1.24.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/parquet-go/bitpack v1.0.0 // indirect
+	github.com/parquet-go/jsonlite v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
-	golang.org/x/sys v0.21.0 // indirect
+	github.com/twpayne/go-geom v1.6.1 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	google.golang.org/protobuf v1.34.2 // indirect
 )
