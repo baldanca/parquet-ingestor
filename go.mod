@@ -1,6 +1,6 @@
 module github.com/baldanca/parquet-ingestor
 
-go 1.23.2
+go 1.23.5
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.2

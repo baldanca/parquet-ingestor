@@ -1,322 +1,338 @@
-# parquet-ingestor
-
-`parquet-ingestor` is a Go pipeline for reading messages from a source, transforming them into typed records, batching them, encoding them, and writing the result to a sink.
-
-This version includes an adaptive runtime that can automatically resize flush workers and source pollers based on backlog, CPU pressure, and memory pressure.
-
-## Highlights
-
-- source → transform → batch → encode → sink pipeline
-- adaptive runtime for flush workers and source pollers
-- structured logging through a pluggable logger
-- generic metrics registry with adapter fanout
-- Datadog / DogStatsD adapter included
-- runtime errors treated as non-fatal by default
-- unit tests, integration tests, and adaptive benchmarks
-
-## Pipeline
-
-1. receive a message from a source
-2. transform the input envelope into the target record type
-3. append the record to the batcher
-4. flush when the batch is full or the flush interval is reached
-5. encode the batch
-6. write the payload to the sink
-7. ack the source messages only after a successful write
-
-## Adaptive runtime
-
-The adaptive runtime lets you configure resource boundaries instead of manually guessing the best worker and poller counts.
-
-```go
-ing.EnableAdaptiveRuntime(ingestor.AdaptiveRuntimeConfig{
-    Enabled:                 true,
-    MinWorkers:              1,
-    MaxWorkers:              16,
-    MinPollers:              1,
-    MaxPollers:              4,
-    TargetCPUUtilization:    0.70,
-    TargetMemoryUtilization: 0.80,
-    MaxMemoryBytes:          512 * 1024 * 1024,
-    SampleInterval:          2 * time.Second,
-    Cooldown:                10 * time.Second,
-})
-```
-
-### Design goals
-
-- memory pressure is more important than aggressive scale up
-- workers are the primary scaling lever
-- pollers scale more conservatively to avoid over-pulling from queues such as SQS
-- runtime decisions are observable through logs and metrics
-- invalid configuration remains fatal, but operational failures are logged and counted instead of killing the process
-
-## Quick start
-
-```go
-cfg := batcher.DefaultBatcherConfig
-cfg.MaxItems = 1000
-cfg.MaxEstimatedInputBytes = 8 * 1024 * 1024
-cfg.FlushInterval = 5 * time.Second
-
-ing, err := ingestor.NewIngestor(
-    cfg,
-    src,
-    transformer,
-    encoder,
-    sink,
-    ingestor.DefaultKeyFunc(encoder),
-)
-if err != nil {
-    return err
-}
-
-ing.SetLogger(observability.NewSlogLogger(slog.New(
-    slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
-)))
-
-ing.SetMetricsRegistry(&observability.Registry{})
-
-ing.EnableAdaptiveRuntime(ingestor.AdaptiveRuntimeConfig{
-    Enabled:                 true,
-    MinWorkers:              1,
-    MaxWorkers:              8,
-    MinPollers:              1,
-    MaxPollers:              4,
-    TargetCPUUtilization:    0.70,
-    TargetMemoryUtilization: 0.80,
-    MaxMemoryBytes:          512 * 1024 * 1024,
-    SampleInterval:          2 * time.Second,
-    Cooldown:                10 * time.Second,
-})
-
-return ing.Run(ctx, 2, 8)
-```
-
-## Manual runtime
-
-You can still run the project in manual mode.
-
-```go
-err := ing.Run(ctx, 4, 16)
-```
-
-The adaptive runtime is optional.
-
-## SQS source runtime scaling
-
-If the source implements `source.PollerScaler`, the adaptive runtime can resize the number of active pollers at runtime.
-
-This is especially useful for pull-based systems such as SQS, where receiving too aggressively can increase in-flight pressure and visibility timeout risk.
-
-## Logging
-
-Logging is now controlled only by the logger level.
-
-There is no ingestor-specific log switch for payloads or sink-write visibility anymore.
-
-Recommended level behavior:
-
-- `Debug`:
-  - input payload
-  - transformed payload
-  - flush worker lifecycle
-- `Info`:
-  - run start / stop
-  - successful sink writes with key, resolved path, file name, item count, and bytes
-  - adaptive scale-up events
-- `Warn`:
-  - adaptive scale-down events
-  - shutdown timeout
-- `Error`:
-  - transform failures
-  - sink write failures
-  - ack failures
-  - receive failures
-  - lease extension failures
-  - any other non-fatal runtime error
+# Parquet Ingestor
 
-Because payload visibility is on the `Debug` level, production environments can keep payload logs disabled simply by running with `Info` or higher.
+High-performance ETL pipeline for batching, transforming, and delivering data to **S3 as Parquet**.
 
-Example with `Info` level:
+**Firehose-like behaviour** with full control, extensibility, and **FinOps efficiency**.
 
-```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-    Level: slog.LevelInfo,
-}))
-ing.SetLogger(observability.NewSlogLogger(logger))
-```
+---
 
-Example with `Debug` level for investigations:
+<p align="center">
+  <a href="https://github.com/baldanca/parquet-ingestor/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/baldanca/parquet-ingestor/actions/workflows/ci.yml/badge.svg">
+  </a>
+  <a href="https://codecov.io/gh/baldanca/parquet-ingestor">
+    <img alt="Coverage" src="https://img.shields.io/codecov/c/github/baldanca/parquet-ingestor">
+  </a>
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.26-blue">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
+  <img alt="Performance" src="https://img.shields.io/badge/Performance-optimized-orange">
+</p>
 
-```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-    Level: slog.LevelDebug,
-}))
-ing.SetLogger(observability.NewSlogLogger(logger))
-```
+---
 
-## Metrics
+## 🚀 TL;DR
 
-The project exposes a generic in-process registry:
+Use this when you need:
 
-```go
-metrics := &observability.Registry{}
-ing.SetMetricsRegistry(metrics)
-```
+- **batching** by **size** _or_ **time**
+- **custom transforms** (JSON → struct, protobuf → struct, etc.)
+- **Parquet** output for **Athena / Spark / Trino / Data Mesh**
+- **autoscaling workers**
+- **graceful shutdown flush** (Kubernetes-friendly)
+- **FinOps** (reduce PUTs, control buffering, tune throughput)
 
-The registry keeps local counters and gauges, and can fan them out to one or more adapters.
+---
 
-Common metrics emitted by the ingestor include:
+## 📑 Table of Contents
 
-- `ingestor_messages_received_total`
-- `ingestor_messages_buffered_total`
-- `ingestor_flush_triggered_total`
-- `ingestor_flush_completed_total`
-- `ingestor_flush_errors_total`
-- `ingestor_sink_errors_total`
-- `ingestor_ack_errors_total`
-- `ingestor_runtime_errors_total`
-- `ingestor_memory_bytes`
-- `ingestor_cpu_utilization`
-- `ingestor_flush_workers`
-- `ingestor_source_pollers`
-- `ingestor_scale_up_total`
-- `ingestor_scale_down_total`
+- [Why](#-why)
+- [Features](#-features)
+- [Demo](#-demo)
+- [Quick Start](#-quick-start)
+- [Architecture](#-architecture)
+- [Configuration](#-configuration)
+- [Reliability & Delivery Guarantees](#-reliability--delivery-guarantees)
+- [Kubernetes](#-kubernetes)
+- [Performance](#-performance)
+- [Firehose vs Parquet Ingestor](#-firehose-vs-parquet-ingestor)
+- [Enterprise Adoption Notes](#-enterprise-adoption-notes)
+- [CI/CD](#-cicd)
+- [Contributing](#-contributing)
+- [Security](#-security)
+- [Roadmap](#-roadmap)
+- [FAQ](#-faq)
+- [Maintainer / Hiring](#-maintainer--hiring)
+- [License](#-license)
 
-### Datadog / DogStatsD
+---
 
-A Datadog-compatible adapter is included.
+## 💡 Why
 
-```go
-type dogstatsdClient interface {
-    Count(name string, value int64, tags []string, rate float64) error
-    Gauge(name string, value float64, tags []string, rate float64) error
-}
+AWS Firehose is powerful, but at scale you may hit:
 
-metrics := &observability.Registry{}
-metrics.AddAdapter(observability.DatadogAdapter{
-    Client: myDogStatsDClient,
-    Prefix: "parquet_ingestor",
-    Tags:   []string{"env:prod", "service:parquet-ingestor"},
-    Rate:   1,
-})
+- **cost** (especially with small objects and high ingestion)
+- **limited customization** in batching/transformations
+- **vendor constraints** when you need deeper pipeline control
+- **harder local testing** for performance regressions
 
-ing.SetMetricsRegistry(metrics)
-```
+Parquet Ingestor is designed to be:
 
-The Datadog integration is covered by tests for:
+- **pluggable** (sources/sinks/transformers)
+- **performance-first** (predictable memory + low allocations)
+- **cost-aware** (batch to reduce PUTs, tune flush strategy)
+- **production ready** (graceful shutdown flush semantics)
 
-- counter forwarding
-- gauge forwarding
-- float gauge forwarding
-- metric prefixing
-- tag forwarding
-- sample-rate normalization
-- nil client safety
+---
 
-## How the adaptive runtime decides
+## ✅ Features
 
-### Scale up workers
+- Batch by **size** or **time**
+- Pluggable **transformer** pipeline
+- **Parquet** encoding optimized for throughput
+- Source: **SQS** (and more planned)
+- Sink: **S3**
+- **Autoscaling workers**
+- **Graceful shutdown flush**
+- Low allocation design (benchmarked)
 
-The runtime tends to add flush workers when:
+---
 
-- the flush queue is filling up
-- CPU is below the configured target
-- memory is below the configured target
+## ⚡ Quick Start
 
-### Scale down workers
-
-The runtime tends to reduce flush workers when:
-
-- memory pressure reaches the configured limit
-- CPU is materially above the configured target
-
-### Scale up pollers
-
-The runtime tends to add pollers when:
-
-- the source buffer is underused
-- the flush queue is not under pressure
-- CPU and memory still have room
-
-### Scale down pollers
-
-The runtime tends to reduce pollers when:
-
-- source buffering pressure is high
-- the system is under CPU or memory pressure
-
-## Runtime error behavior
-
-Configuration errors are still fatal. Examples:
-
-- nil source
-- nil transformer
-- nil encoder
-- nil sink
-- nil key function
-- invalid batcher configuration
-- key function failure during flush, because the destination path cannot be resolved safely
-
-Operational runtime failures are treated as non-fatal. They are logged at `Error` level and counted in metrics.
-
-Examples:
-
-- source receive failures
-- transform failures
-- encoder failures
-- sink write failures
-- ack failures
-- lease-renewal failures
-- flush worker job failures
-
-This keeps the process alive while preserving observability.
-
-## Testing
-
-The repository includes:
-
-- unit tests for batcher, source, encoder, sink, retry, and adaptive runtime
-- integration tests for end-to-end ingest behavior
-- benchmarks for encoder, source, sink, and adaptive runtime decisions
-
-Adaptive runtime coverage includes tests for:
-
-- worker pool resize
-- scale-up decisions
-- scale-down decisions
-- runtime metric publication
-
-Adaptive runtime benchmarks include:
-
-- scale-up decision path
-- scale-down decision path
-
-## Backward compatibility
-
-The manual `Run(ctx, flushWorkers, flushQueue)` API is unchanged.
-
-If adaptive runtime is disabled, the project behaves like a manually tuned ingestor.
-
-## Roadmap
-
-- adaptive tuning for batch size and flush interval
-- additional metric adapters
-- more source-specific control heuristics
-- richer backpressure controls for pull-based queues
-
-## Benchmark profiles
-
-Benchmarks support two profiles:
-
-- `full`: default outside CI. Runs the full benchmark matrix.
-- `ci`: enabled automatically when `CI` or `GITHUB_ACTIONS` is set, or explicitly with `PARQUET_INGESTOR_BENCH_PROFILE=ci`. Runs a reduced benchmark matrix to keep CI fast and deterministic.
-
-Examples:
+Install:
 
 ```bash
-go test ./... -bench=./... -benchmem
-PARQUET_INGESTOR_BENCH_PROFILE=full go test ./... -bench=./... -benchmem
-PARQUET_INGESTOR_BENCH_PROFILE=ci go test ./... -bench=./... -benchmem
+go get github.com/baldanca/parquet-ingestor
 ```
+
+Minimal example:
+
+```go
+package main
+
+import (
+  "context"
+  "log"
+
+  "github.com/baldanca/parquet-ingestor/ingestor"
+)
+
+func main() {
+  ctx := context.Background()
+
+  ing := ingestor.NewDefault()
+
+  if err := ing.Run(ctx); err != nil {
+    log.Fatal(err)
+  }
+}
+```
+
+---
+
+## 🏗 Architecture
+
+Pipeline:
+
+```
+Source → Transformer → Batcher → Encoder → Sink
+```
+
+### Flush triggers
+
+A batch is flushed when:
+
+- **batch size** reaches the configured limit
+- **flush timeout** is reached
+- **shutdown** signal is received (graceful flush)
+
+---
+
+## ⚙️ Configuration
+
+> Defaults are tuned for general production workloads; override per traffic profile.
+
+### Batch
+
+- `BatchSizeMB`  
+  Maximum buffer size before flushing (default example: **5MB**)
+
+- `FlushInterval`  
+  Maximum time before forced flush (default example: **5 minutes**)
+
+### Workers
+
+Autoscaler modes:
+
+- **Fixed**: constant number of workers
+- **High Performance**: dynamic scaling based on:
+  - CPU availability
+  - memory pressure
+  - buffer backlog
+
+---
+
+## 🛡 Reliability & Delivery Guarantees
+
+Designed for consistent delivery under normal operating conditions:
+
+- Flush on **size/time**
+- Flush on **shutdown**
+- Ack strategy designed to avoid losing already-processed batches
+
+> If you need stricter semantics (exactly-once), you typically design it end-to-end with idempotency + dedupe downstream.
+
+---
+
+## ☸ Kubernetes
+
+Recommended:
+
+- `terminationGracePeriodSeconds >= FlushInterval` _(or a sensible upper bound for your flush)_
+
+Behaviour on pod termination:
+
+1. stop ingestion
+2. flush remaining batch
+3. ack processed messages
+4. exit
+
+---
+
+## 📊 Performance
+
+Example benchmark (Ryzen 5600G):
+
+- 10 records: ~28µs, ~134 allocs/op
+- 10,000 records: ~468µs, ~137 allocs/op
+
+Run locally:
+
+```bash
+go test ./... -bench=. -benchmem
+```
+
+### Benchmark policy
+
+Performance-sensitive changes should:
+
+- include benchmarks
+- keep allocations stable (or justify increases)
+- explain tradeoffs in PR description
+
+---
+
+## 🔥 Firehose vs Parquet Ingestor
+
+| Capability             | Firehose | Parquet Ingestor |
+| ---------------------- | -------: | ---------------: |
+| Custom batching        |  limited |          ✅ full |
+| Custom transformations |  limited |          ✅ full |
+| Local dev / profiling  |     hard |          ✅ easy |
+| Vendor lock-in         |   higher |         ✅ lower |
+| FinOps control         |    lower |        ✅ higher |
+| Pipeline extensibility |  limited |     ✅ pluggable |
+
+---
+
+## 🏢 Enterprise Adoption Notes
+
+This project is a good fit when you have:
+
+- high TPS ingestion pipelines
+- analytics-first storage formats (Parquet)
+- data mesh requirements (S3 as lake storage)
+- strong cost controls (FinOps)
+
+Recommended additions (optional, common in enterprise):
+
+- OpenTelemetry metrics/exporter
+- structured logging
+- integration tests in CI (localstack / testcontainers)
+
+---
+
+## 🤖 CI/CD
+
+This repo ships with a GitHub Actions workflow (`.github/workflows/ci.yml`) that runs:
+
+- `go test` + coverage
+- `golangci-lint`
+- (optional) benchmarks (kept off by default in CI)
+
+Coverage upload is configured for **Codecov** (works well for public repos).
+
+---
+
+## 🤝 Contributing
+
+### Requirements
+
+- Go **1.23**
+- Make sure tests and lint pass
+
+### Local checks
+
+```bash
+go test ./...
+go test ./... -coverprofile=coverage.out
+golangci-lint run
+```
+
+### Benchmarks
+
+```bash
+go test ./... -bench=. -benchmem
+```
+
+Guidelines:
+
+- prefer composition
+- keep allocations low
+- add tests + benchmarks for perf changes
+
+---
+
+## 🔐 Security
+
+Please report vulnerabilities privately:
+
+- **luiz.baldanca@gmail.com**
+
+Do not open public issues for security vulnerabilities.
+
+---
+
+## 🗺 Roadmap
+
+- Kafka source
+- Compression options
+- Metrics exporter (OpenTelemetry)
+- Multi-sink strategies
+- Backpressure / adaptive buffering (if needed)
+
+---
+
+## ❓ FAQ
+
+### Is it production ready?
+
+Yes — designed for high throughput ingestion with graceful shutdown flush.
+
+### Does it guarantee delivery?
+
+It is designed for consistent delivery with shutdown flush support. For strict guarantees, combine with idempotent sinks and downstream dedupe where needed.
+
+### Does it support other sources/sinks?
+
+The architecture is pluggable; SQS/S3 are the primary supported implementations currently.
+
+---
+
+## ⭐ Maintainer / Hiring
+
+Maintainer: **Luiz Baldança**
+
+If you want help integrating this into your data platform or need consulting on:
+
+- high throughput Go pipelines
+- AWS messaging (SQS/SNS)
+- FinOps optimization
+
+Reach out: **luiz.baldanca@gmail.com**
+
+---
+
+## 📄 License
+
+MIT License.

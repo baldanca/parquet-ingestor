@@ -195,11 +195,9 @@ jobs:
           cache: true
 
       - name: go bench
-        env:
-          PARQUET_INGESTOR_BENCH_PROFILE: ci
         run: |
           set -euo pipefail
-          go test ./... -bench=./... -benchmem
+          go test ./encoder ./ingestor ./sink ./source -short -run=^$ -bench=. -benchmem -benchtime=100ms
 
   create-release-pr:
     name: Create/Update release/x.y.z -> main PR (auto semver)

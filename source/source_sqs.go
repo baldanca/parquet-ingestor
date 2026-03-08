@@ -10,7 +10,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"github.com/baldanca/parquet-ingestor/observability"
 )
 
 // ErrClosed is returned when Receive is called after the source has been closed.
@@ -44,8 +43,6 @@ type SourceSQSConfig struct {
 	BufSize int
 
 	FailVisibilityTimeoutSeconds *int32
-	Logger                       observability.Logger
-	Metrics                      *observability.Registry
 }
 
 func (c *SourceSQSConfig) validate() {
@@ -76,8 +73,6 @@ var DefaultSourceSQSConfig = SourceSQSConfig{
 	VisibilityTO:    30,
 	Pollers:         3,
 	BufSize:         256,
-	Logger:          observability.NopLogger(),
-	Metrics:         &observability.Registry{},
 }
 
 type sqsAPI interface {
@@ -88,6 +83,8 @@ type sqsAPI interface {
 }
 
 // SourceSQS is an Amazon SQS source with internal long-polling workers.
+//
+// Close cancels pollers and will eventually make Receive return ErrClosed.
 type SourceSQS struct {
 	cfg SourceSQSConfig
 
@@ -98,14 +95,9 @@ type SourceSQS struct {
 	bufCh chan *sqstypes.Message
 
 	closeOnce sync.Once
-	rootCtx   context.Context
 	cancel    context.CancelFunc
 
 	wg sync.WaitGroup
-
-	mu      sync.Mutex
-	pollers []context.CancelFunc
-	closed  bool
 }
 
 // NewSourceSQSWithConfig creates a SourceSQS.
@@ -117,12 +109,6 @@ func NewSourceSQSWithConfig(ctx context.Context, client sqsAPI, queueURL string,
 		panic("queue url is required")
 	}
 	cfg.validate()
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NopLogger()
-	}
-	if cfg.Metrics == nil {
-		cfg.Metrics = &observability.Registry{}
-	}
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -131,13 +117,11 @@ func NewSourceSQSWithConfig(ctx context.Context, client sqsAPI, queueURL string,
 		client:   client,
 		queueURL: queueURL,
 		bufCh:    make(chan *sqstypes.Message, cfg.BufSize),
-		rootCtx:  ctx,
 		cancel:   cancel,
 	}
 	s.queueURLPtr = &s.queueURL
-	s.cfg.Metrics.SetGauge("source_sqs_pollers", int64(cfg.Pollers))
-	s.cfg.Metrics.SetGauge("source_sqs_buffer_capacity", int64(cfg.BufSize))
-	s.startPollers(cfg.Pollers)
+
+	s.startPollers(ctx)
 	return s
 }
 
@@ -146,18 +130,18 @@ func NewSourceSQS(ctx context.Context, client sqsAPI, queueURL string) *SourceSQ
 	return NewSourceSQSWithConfig(ctx, client, queueURL, DefaultSourceSQSConfig)
 }
 
-func (s *SourceSQS) startPollers(n int) {
-	for i := 0; i < n; i++ {
-		ctx, cancel := context.WithCancel(s.rootCtx)
-		s.pollers = append(s.pollers, cancel)
-		s.wg.Add(1)
-		go func(id int, pollCtx context.Context) {
+func (s *SourceSQS) startPollers(ctx context.Context) {
+	s.wg.Add(s.cfg.Pollers)
+	for i := 0; i < s.cfg.Pollers; i++ {
+		go func() {
 			defer s.wg.Done()
-			s.cfg.Logger.Debug("source_sqs.poller.started", "poller_id", id)
-			s.pollLoop(pollCtx)
-			s.cfg.Logger.Debug("source_sqs.poller.stopped", "poller_id", id)
-		}(len(s.pollers), ctx)
+			s.pollLoop(ctx)
+		}()
 	}
+	go func() {
+		s.wg.Wait()
+		close(s.bufCh)
+	}()
 }
 
 func (s *SourceSQS) pollLoop(ctx context.Context) {
@@ -180,7 +164,6 @@ func (s *SourceSQS) pollLoop(ctx context.Context) {
 		cancel()
 
 		if err != nil {
-			s.cfg.Metrics.AddCounter("source_sqs_receive_errors_total", 1)
 			select {
 			case <-time.After(250 * time.Millisecond):
 				continue
@@ -188,14 +171,11 @@ func (s *SourceSQS) pollLoop(ctx context.Context) {
 				return
 			}
 		}
-		s.cfg.Metrics.AddCounter("source_sqs_receive_calls_total", 1)
-		s.cfg.Metrics.AddCounter("source_sqs_messages_received_total", int64(len(out.Messages)))
 
 		for i := range out.Messages {
 			msg := &out.Messages[i]
 			select {
 			case s.bufCh <- msg:
-				s.cfg.Metrics.SetGauge("source_sqs_buffer_used", int64(len(s.bufCh)))
 			case <-ctx.Done():
 				return
 			}
@@ -203,54 +183,10 @@ func (s *SourceSQS) pollLoop(ctx context.Context) {
 	}
 }
 
-// SetPollers resizes the number of active SQS pollers at runtime.
-func (s *SourceSQS) SetPollers(n int) {
-	if n < 1 {
-		n = 1
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	current := len(s.pollers)
-	if n == current {
-		return
-	}
-	if n > current {
-		s.cfg.Logger.Info("source_sqs.pollers.scale_up", "from", current, "to", n)
-		s.startPollers(n - current)
-	} else {
-		s.cfg.Logger.Info("source_sqs.pollers.scale_down", "from", current, "to", n)
-		for i := current - 1; i >= n; i-- {
-			s.pollers[i]()
-		}
-		s.pollers = s.pollers[:n]
-	}
-	s.cfg.Metrics.SetGauge("source_sqs_pollers", int64(len(s.pollers)))
-}
-
-// Pollers returns the current number of active pollers.
-func (s *SourceSQS) Pollers() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.pollers)
-}
-
-// BufferUsage returns current source buffer usage.
-func (s *SourceSQS) BufferUsage() (used, capacity int) {
-	return len(s.bufCh), cap(s.bufCh)
-}
-
-// Close stops polling and closes the internal message channel once all pollers exit.
+// Close stops polling.
 func (s *SourceSQS) Close() {
 	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
 		s.cancel()
-		s.wg.Wait()
-		close(s.bufCh)
 	})
 }
 
@@ -262,14 +198,16 @@ func (s *SourceSQS) Receive(ctx context.Context) (Message, error) {
 		if !ok {
 			return nil, ErrClosed
 		}
-		s.cfg.Metrics.SetGauge("source_sqs_buffer_used", int64(len(s.bufCh)))
 		return &message{src: s, m: m}, nil
 	}
 }
 
-type ackable interface{ AckHandle() ackHandle }
+type ackable interface {
+	AckHandle() ackHandle
+}
 
 // AckBatch deletes messages from SQS in batches of up to 10.
+// It tries a fast-path for internal *message values to avoid allocations.
 func (s *SourceSQS) AckBatch(ctx context.Context, msgs []Message) error {
 	if len(msgs) == 0 {
 		return nil
@@ -291,85 +229,95 @@ func (s *SourceSQS) AckBatch(ctx context.Context, msgs []Message) error {
 			if m == nil {
 				continue
 			}
+
 			entries[n].Id = sqsBatchIDPtrs[n]
+
+			// Fast path: internal message already has pointers compatible with AWS SDK.
 			if im, ok := m.(*message); ok && im != nil && im.m != nil && im.m.ReceiptHandle != nil {
 				entries[n].ReceiptHandle = im.m.ReceiptHandle
 				n++
 				continue
 			}
+
+			// Fallback: interface-based ack handle (may allocate depending on implementation).
 			am, ok := m.(ackable)
 			if !ok {
 				return fmt.Errorf("message does not support AckHandle(): %T", m)
 			}
 			h := am.AckHandle()
 			rh := h.receiptHandle
-			entries[n].ReceiptHandle = &rh
+			entries[n].ReceiptHandle = &rh // escapes for non-internal messages
 			n++
 		}
+
 		if n == 0 {
 			continue
 		}
+
 		in.Entries = entries[:n]
 		out, err := s.client.DeleteMessageBatch(ctx, &in)
 		if err != nil {
-			s.cfg.Metrics.AddCounter("source_sqs_ack_errors_total", 1)
 			return err
 		}
 		if len(out.Failed) > 0 {
 			f := out.Failed[0]
 			code, msg := aws.ToString(f.Code), aws.ToString(f.Message)
-			s.cfg.Metrics.AddCounter("source_sqs_ack_errors_total", 1)
-			return fmt.Errorf("delete batch failed: code=%s message=%s", code, msg)
+			return fmt.Errorf("delete message batch failed: code=%s message=%s", code, msg)
 		}
-		s.cfg.Metrics.AddCounter("source_sqs_acked_total", int64(n))
 	}
+
 	return nil
 }
 
-// AckBatchMeta deletes messages using compact metadata handles.
+// AckBatchMeta deletes messages from SQS in batches of up to 10 using AckMetadata.
+// It uses stable Entry IDs and takes ReceiptHandle pointers directly from the metas slice to avoid per-entry heap allocations.
 func (s *SourceSQS) AckBatchMeta(ctx context.Context, metas []AckMetadata) error {
 	if len(metas) == 0 {
 		return nil
 	}
+
 	const max = 10
 	entries := make([]sqstypes.DeleteMessageBatchRequestEntry, max)
 	in := sqs.DeleteMessageBatchInput{QueueUrl: s.queueURLPtr}
+
 	for i := 0; i < len(metas); i += max {
 		end := i + max
 		if end > len(metas) {
 			end = len(metas)
 		}
+
 		n := 0
 		for j := i; j < end; j++ {
-			rh := metas[j].Handle
-			if rh == "" {
+			rh := &metas[j].Handle
+			if *rh == "" {
 				continue
 			}
 			entries[n].Id = sqsBatchIDPtrs[n]
-			entries[n].ReceiptHandle = &rh
+			entries[n].ReceiptHandle = rh
 			n++
 		}
+
 		if n == 0 {
 			continue
 		}
+
 		in.Entries = entries[:n]
 		out, err := s.client.DeleteMessageBatch(ctx, &in)
 		if err != nil {
-			s.cfg.Metrics.AddCounter("source_sqs_ack_errors_total", 1)
 			return err
 		}
 		if len(out.Failed) > 0 {
 			f := out.Failed[0]
 			code, msg := aws.ToString(f.Code), aws.ToString(f.Message)
-			s.cfg.Metrics.AddCounter("source_sqs_ack_errors_total", 1)
-			return fmt.Errorf("delete batch failed: code=%s message=%s", code, msg)
+			return fmt.Errorf("delete message batch failed: code=%s message=%s", code, msg)
 		}
-		s.cfg.Metrics.AddCounter("source_sqs_acked_total", int64(n))
 	}
+
 	return nil
 }
 
-// ExtendVisibilityBatch updates visibility timeout in batch requests.
+// ExtendVisibilityBatch extends the visibility timeout for a batch of messages.
+// The request is sent in chunks of up to 10 entries.
 func (s *SourceSQS) ExtendVisibilityBatch(ctx context.Context, metas []AckMetadata, timeoutSeconds int32) error {
 	if len(metas) == 0 {
 		return nil
@@ -377,14 +325,17 @@ func (s *SourceSQS) ExtendVisibilityBatch(ctx context.Context, metas []AckMetada
 	if timeoutSeconds < 0 {
 		return fmt.Errorf("timeoutSeconds must be non-negative")
 	}
+
 	const max = 10
 	entries := make([]sqstypes.ChangeMessageVisibilityBatchRequestEntry, max)
 	in := sqs.ChangeMessageVisibilityBatchInput{QueueUrl: s.queueURLPtr}
+
 	for i := 0; i < len(metas); i += max {
 		end := i + max
 		if end > len(metas) {
 			end = len(metas)
 		}
+
 		n := 0
 		for j := i; j < end; j++ {
 			rh := &metas[j].Handle
@@ -396,23 +347,23 @@ func (s *SourceSQS) ExtendVisibilityBatch(ctx context.Context, metas []AckMetada
 			entries[n].VisibilityTimeout = timeoutSeconds
 			n++
 		}
+
 		if n == 0 {
 			continue
 		}
+
 		in.Entries = entries[:n]
 		out, err := s.client.ChangeMessageVisibilityBatch(ctx, &in)
 		if err != nil {
-			s.cfg.Metrics.AddCounter("source_sqs_visibility_errors_total", 1)
 			return err
 		}
 		if len(out.Failed) > 0 {
 			f := out.Failed[0]
 			code, msg := aws.ToString(f.Code), aws.ToString(f.Message)
-			s.cfg.Metrics.AddCounter("source_sqs_visibility_errors_total", 1)
 			return fmt.Errorf("change visibility batch failed: code=%s message=%s", code, msg)
 		}
-		s.cfg.Metrics.AddCounter("source_sqs_visibility_extensions_total", int64(n))
 	}
+
 	return nil
 }
 
@@ -421,8 +372,14 @@ type message struct {
 	m   *sqstypes.Message
 }
 
-func (m *message) Data() Envelope                    { return Envelope{Payload: aws.ToString(m.m.Body)} }
-func (m *message) EstimatedSizeBytes() (int64, bool) { return int64(len(aws.ToString(m.m.Body))), true }
+func (m *message) Data() Envelope {
+	return Envelope{Payload: aws.ToString(m.m.Body)}
+}
+
+func (m *message) EstimatedSizeBytes() (int64, bool) {
+	return int64(len(aws.ToString(m.m.Body))), true
+}
+
 func (m *message) Fail(ctx context.Context, reason error) error {
 	if m.src.cfg.FailVisibilityTimeoutSeconds == nil {
 		return nil
@@ -432,14 +389,15 @@ func (m *message) Fail(ctx context.Context, reason error) error {
 		ReceiptHandle:     m.m.ReceiptHandle,
 		VisibilityTimeout: *m.src.cfg.FailVisibilityTimeoutSeconds,
 	})
-	if err != nil {
-		m.src.cfg.Metrics.AddCounter("source_sqs_fail_visibility_errors_total", 1)
-	}
 	return err
 }
 
-type ackHandle struct{ id, receiptHandle string }
+type ackHandle struct {
+	id            string
+	receiptHandle string
+}
 
+// Improvement #3: avoid aws.ToString in hot-path extraction (no helper call, no extra work).
 func (m *message) AckHandle() ackHandle {
 	var id, rh string
 	if m.m.MessageId != nil {
@@ -450,6 +408,8 @@ func (m *message) AckHandle() ackHandle {
 	}
 	return ackHandle{id: id, receiptHandle: rh}
 }
+
+// Improvement #3: same here (still returns strings, but avoids aws.ToString calls).
 func (m *message) AckMeta() (AckMetadata, bool) {
 	var id, rh string
 	if m.m.MessageId != nil {

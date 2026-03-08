@@ -473,8 +473,16 @@ func makeMsgs(n int) []*bMsg {
 	return msgs
 }
 
+
+func benchIngestorSizes() []int {
+	if testing.Short() {
+		return []int{10, 100}
+	}
+	return []int{10, 100, 1_000, 10_000}
+}
+
 func BenchmarkIngestor_FlushOnly_Fallback(b *testing.B) {
-	for _, n := range benchcfg.Ints([]int{10, 100, 1_000, 10_000}, []int{100, 1_000}) {
+	for _, n := range benchIngestorSizes() {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			cfg := newCfg()
 			ctx := context.Background()
@@ -509,7 +517,7 @@ func BenchmarkIngestor_FlushOnly_Fallback(b *testing.B) {
 }
 
 func BenchmarkIngestor_FlushOnly_Streaming(b *testing.B) {
-	for _, n := range benchcfg.Ints([]int{10, 100, 1_000, 10_000}, []int{100, 1_000}) {
+	for _, n := range benchIngestorSizes() {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			cfg := newCfg()
 			ctx := context.Background()

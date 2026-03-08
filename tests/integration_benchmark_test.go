@@ -11,7 +11,6 @@ import (
 	"github.com/baldanca/parquet-ingestor/batcher"
 	"github.com/baldanca/parquet-ingestor/encoder"
 	"github.com/baldanca/parquet-ingestor/ingestor"
-	"github.com/baldanca/parquet-ingestor/internal/benchcfg"
 	"github.com/baldanca/parquet-ingestor/sink"
 	"github.com/baldanca/parquet-ingestor/source"
 )
@@ -52,11 +51,11 @@ func (s blackholeSink) WriteStream(ctx context.Context, req sink.StreamWriteRequ
 }
 
 func BenchmarkIntegration_Ingestor_Streaming(b *testing.B) {
-	if benchcfg.IsCI() {
-		b.Skip("skipping heavy integration benchmark in CI profile")
+	if testing.Short() {
+		b.Skip("skipping integration benchmark in short mode")
 	}
 
-	batchItems := benchcfg.Int(1000, 200)
+	const batchItems = 1000
 
 	enc := encoder.ParquetEncoder[testItem]{Compression: "snappy"}
 

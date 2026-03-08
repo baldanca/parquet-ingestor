@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/baldanca/parquet-ingestor/internal/benchcfg"
 )
 
 type testMsg struct {
@@ -322,8 +320,16 @@ func benchmarkAckGroupClear(b *testing.B, n int, withNil bool) {
 	}
 }
 
+
+func benchAckGroupSizes() []int {
+	if testing.Short() {
+		return []int{100, 1000}
+	}
+	return []int{100, 1000, 5000}
+}
+
 func BenchmarkAckGroup_Clear_WithNil(b *testing.B) {
-	for _, n := range benchcfg.Ints([]int{100, 1000, 5000}, []int{100, 1000}) {
+	for _, n := range benchAckGroupSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			benchmarkAckGroupClear(b, n, true)
 		})
@@ -331,7 +337,7 @@ func BenchmarkAckGroup_Clear_WithNil(b *testing.B) {
 }
 
 func BenchmarkAckGroup_Clear_NoNil(b *testing.B) {
-	for _, n := range benchcfg.Ints([]int{100, 1000, 5000}, []int{100, 1000}) {
+	for _, n := range benchAckGroupSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			benchmarkAckGroupClear(b, n, false)
 		})
@@ -339,7 +345,7 @@ func BenchmarkAckGroup_Clear_NoNil(b *testing.B) {
 }
 
 func BenchmarkAckGroup_Commit(b *testing.B) {
-	for _, n := range benchcfg.Ints([]int{100, 1000, 5000}, []int{100, 1000}) {
+	for _, n := range benchAckGroupSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			var g AckGroup
 			for i := 0; i < n; i++ {
@@ -362,7 +368,7 @@ func BenchmarkAckGroup_Commit(b *testing.B) {
 }
 
 func BenchmarkAckGroup_Commit_Parallel(b *testing.B) {
-	for _, n := range benchcfg.Ints([]int{100, 1000, 5000}, []int{100, 1000}) {
+	for _, n := range benchAckGroupSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			src := benchSrc{}
 			ctx := context.Background()
@@ -390,7 +396,7 @@ func BenchmarkAckGroup_Commit_FastPath_MetaBatch(b *testing.B) {
 	ctx := context.Background()
 	src := benchSrc{}
 
-	n := benchcfg.Int(1000, 250)
+	const n = 1000
 	var g AckGroup
 	g.msgs = make([]Message, 0, n)
 	for i := 0; i < n; i++ {
@@ -408,7 +414,7 @@ func BenchmarkAckGroup_Commit_Fallback_AckBatch(b *testing.B) {
 	ctx := context.Background()
 	src := benchSrc{}
 
-	n := benchcfg.Int(1000, 250)
+	const n = 1000
 	var g AckGroup
 	g.msgs = make([]Message, 0, n)
 	for i := 0; i < n; i++ {
