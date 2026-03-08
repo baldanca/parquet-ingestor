@@ -320,15 +320,22 @@ func benchmarkAckGroupClear(b *testing.B, n int, withNil bool) {
 	}
 }
 
-func benchAckGroupSizes() []int {
+func ackGroupBenchSizes() []int {
 	if testing.Short() {
 		return []int{100, 1000}
 	}
 	return []int{100, 1000, 5000}
 }
 
+func ackGroupFastPathBenchSize() int {
+	if testing.Short() {
+		return 250
+	}
+	return 1000
+}
+
 func BenchmarkAckGroup_Clear_WithNil(b *testing.B) {
-	for _, n := range benchAckGroupSizes() {
+	for _, n := range ackGroupBenchSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			benchmarkAckGroupClear(b, n, true)
 		})
@@ -336,7 +343,7 @@ func BenchmarkAckGroup_Clear_WithNil(b *testing.B) {
 }
 
 func BenchmarkAckGroup_Clear_NoNil(b *testing.B) {
-	for _, n := range benchAckGroupSizes() {
+	for _, n := range ackGroupBenchSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			benchmarkAckGroupClear(b, n, false)
 		})
@@ -344,7 +351,7 @@ func BenchmarkAckGroup_Clear_NoNil(b *testing.B) {
 }
 
 func BenchmarkAckGroup_Commit(b *testing.B) {
-	for _, n := range benchAckGroupSizes() {
+	for _, n := range ackGroupBenchSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			var g AckGroup
 			for i := 0; i < n; i++ {
@@ -367,7 +374,7 @@ func BenchmarkAckGroup_Commit(b *testing.B) {
 }
 
 func BenchmarkAckGroup_Commit_Parallel(b *testing.B) {
-	for _, n := range benchAckGroupSizes() {
+	for _, n := range ackGroupBenchSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			src := benchSrc{}
 			ctx := context.Background()
@@ -395,7 +402,7 @@ func BenchmarkAckGroup_Commit_FastPath_MetaBatch(b *testing.B) {
 	ctx := context.Background()
 	src := benchSrc{}
 
-	const n = 1000
+	n := ackGroupFastPathBenchSize()
 	var g AckGroup
 	g.msgs = make([]Message, 0, n)
 	for i := 0; i < n; i++ {
@@ -413,7 +420,7 @@ func BenchmarkAckGroup_Commit_Fallback_AckBatch(b *testing.B) {
 	ctx := context.Background()
 	src := benchSrc{}
 
-	const n = 1000
+	n := ackGroupFastPathBenchSize()
 	var g AckGroup
 	g.msgs = make([]Message, 0, n)
 	for i := 0; i < n; i++ {
