@@ -134,14 +134,3 @@ func (g AckGroup) Snapshot() AckGroup {
 func (g *AckGroup) Metas() []AckMetadata {
 	return g.metas
 }
-
-// PollerScaler allows sources with internal pollers to be resized at runtime.
-type PollerScaler interface {
-	SetPollers(n int)
-	Pollers() int
-}
-
-// BufferStats exposes source buffering pressure to adaptive runtimes.
-type BufferStats interface {
-	BufferUsage() (used, capacity int)
-}

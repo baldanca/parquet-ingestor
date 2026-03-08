@@ -231,8 +231,7 @@ func newTestSourceNoPollers(ctx context.Context, api sqsAPI, queueURL string, cf
 
 func newTestSource(ctx context.Context, api sqsAPI, queueURL string, cfg SourceSQSConfig) *SourceSQS {
 	s, pollCtx := newTestSourceNoPollers(ctx, api, queueURL, cfg)
-	s.rootCtx = pollCtx
-	s.startPollers(cfg.Pollers)
+	s.startPollers(pollCtx)
 	return s
 }
 
