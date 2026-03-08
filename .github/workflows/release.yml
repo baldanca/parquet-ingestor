@@ -1,4 +1,4 @@
-name: Pipe 3 - Release/x.y.z -> Main (tag on merge)
+name: Pipe 3 - Release/x.y.z -> Main (tag + GitHub release on merge)
 
 on:
   pull_request:
@@ -10,12 +10,12 @@ permissions:
   contents: write
 
 concurrency:
-  group: pipe3-main-tag
+  group: pipe3-main-release
   cancel-in-progress: true
 
 jobs:
-  tag:
-    name: Generate tag vX.Y.Z on merge of release/x.y.z
+  publish:
+    name: Generate tag and GitHub release on merge of release/x.y.z
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true
     steps:
@@ -55,16 +55,14 @@ jobs:
             const tag = `${{ steps.v.outputs.tag }}`;
             const sha = `${{ steps.v.outputs.sha }}`;
 
-            // If tag already exists, skip
             try {
               await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
-              core.info(`Tag ${tag} already exists. Skipping.`);
+              core.info(`Tag ${tag} already exists. Skipping tag creation.`);
               return;
             } catch (e) {
               if (e.status !== 404) throw e;
             }
 
-            // Create lightweight tag ref
             await github.rest.git.createRef({
               owner,
               repo,
@@ -73,3 +71,15 @@ jobs:
             });
 
             core.info(`Created tag ${tag} at ${sha}`);
+
+      - name: Create or update GitHub release
+        if: steps.v.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          target_commitish: ${{ steps.v.outputs.sha }}
+          generate_release_notes: true
+          make_latest: true
+          append_body: true
+          body: |
+            Release generated automatically after merge of `${{ github.event.pull_request.head.ref }}` into `main`.

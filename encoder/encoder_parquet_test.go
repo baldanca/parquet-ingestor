@@ -274,22 +274,8 @@ func benchmarkParquetEncodeToDiscard(b *testing.B, n int, compression ParquetCom
 	}
 }
 
-func benchEncoderSizes() []int {
-	if testing.Short() {
-		return []int{10, 100}
-	}
-	return []int{10, 100, 1_000, 10_000}
-}
-
-func benchEncoderParallelItems() []benchItem {
-	if testing.Short() {
-		return makeBenchItems(100)
-	}
-	return makeBenchItems(1000)
-}
-
 func BenchmarkParquetEncoder_NoCompression(b *testing.B) {
-	for _, n := range benchEncoderSizes() {
+	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			benchmarkParquetEncode(b, n, "")
 		})
@@ -297,7 +283,7 @@ func BenchmarkParquetEncoder_NoCompression(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_NoCompression_EncodeToDiscard(b *testing.B) {
-	for _, n := range benchEncoderSizes() {
+	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			benchmarkParquetEncodeToDiscard(b, n, ParquetCompressionNone)
 		})
@@ -305,7 +291,7 @@ func BenchmarkParquetEncoder_NoCompression_EncodeToDiscard(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_Snappy(b *testing.B) {
-	for _, n := range benchEncoderSizes() {
+	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			benchmarkParquetEncode(b, n, ParquetCompressionSnappy)
 		})
@@ -313,7 +299,7 @@ func BenchmarkParquetEncoder_Snappy(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_Snappy_EncodeToDiscard(b *testing.B) {
-	for _, n := range benchEncoderSizes() {
+	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			benchmarkParquetEncodeToDiscard(b, n, "snappy")
 		})
@@ -321,7 +307,7 @@ func BenchmarkParquetEncoder_Snappy_EncodeToDiscard(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_Gzip(b *testing.B) {
-	for _, n := range benchEncoderSizes() {
+	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			benchmarkParquetEncode(b, n, "gzip")
 		})
@@ -329,7 +315,7 @@ func BenchmarkParquetEncoder_Gzip(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_Zstd(b *testing.B) {
-	for _, n := range benchEncoderSizes() {
+	for _, n := range []int{10, 100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			benchmarkParquetEncode(b, n, "zstd")
 		})
@@ -337,7 +323,7 @@ func BenchmarkParquetEncoder_Zstd(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_NoCompression_Parallel(b *testing.B) {
-	items := benchEncoderParallelItems()
+	items := makeBenchItems(1000)
 	enc := ParquetEncoder[benchItem]{Compression: ""}
 	ctx := context.Background()
 
@@ -358,7 +344,7 @@ func BenchmarkParquetEncoder_NoCompression_Parallel(b *testing.B) {
 }
 
 func BenchmarkParquetEncoder_NoCompression_EncodeToDiscard_Parallel(b *testing.B) {
-	items := benchEncoderParallelItems()
+	items := makeBenchItems(1000)
 	enc := ParquetEncoder[benchItem]{Compression: ""}
 	ctx := context.Background()
 
