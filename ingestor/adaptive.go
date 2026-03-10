@@ -191,10 +191,17 @@ func (i *Ingestor[iType]) applyAdaptiveDecision(s runtimeSnapshot) bool {
 		}
 	}
 
-	if flushUsage <= 0.25 && sourceUsage <= 0.10 && s.cpuUtil < cfg.TargetCPUUtilization-0.1 && (cfg.MaxMemoryBytes == 0 || memPressure < cfg.TargetMemoryUtilization-0.1) {
+	// Only scale pollers up when there is actual source-side pressure.
+	// Low source usage usually means the queue is idle, so treating that as a
+	// scale-up signal makes pollers ramp to max even when there are no messages.
+	// We only add pollers when the source buffer is filling up while the flush
+	// pipeline is still healthy and the runtime still has headroom.
+	if sourceUsage >= 0.60 && flushUsage <= 0.50 &&
+		s.cpuUtil < cfg.TargetCPUUtilization-0.1 &&
+		(cfg.MaxMemoryBytes == 0 || memPressure < cfg.TargetMemoryUtilization-0.1) {
 		if scaled, from, to := i.adjustPollers(pollers, +1, minPollers, maxPollers); scaled {
 			i.metrics.AddCounter("ingestor_scale_up_total", 1)
-			i.logger.Info("ingestor.adaptive.scale_up_pollers", "from", from, "to", to, "source_usage", sourceUsage)
+			i.logger.Info("ingestor.adaptive.scale_up_pollers", "from", from, "to", to, "source_usage", sourceUsage, "flush_usage", flushUsage)
 			return true
 		}
 	}
