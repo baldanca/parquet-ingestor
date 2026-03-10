@@ -97,7 +97,6 @@ func TestIngestor_AdaptiveDecision_ScalesUpWorkersAndPollersWhenSourceIsUnderPre
 	close(ing.flushJobs)
 }
 
-
 func TestIngestor_AdaptiveDecision_DoesNotScaleUpPollersWhenIdle(t *testing.T) {
 	src := &adaptiveSource{tSource: newTSource(), pollers: 1, used: 0, cap: 10}
 	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
