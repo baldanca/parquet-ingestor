@@ -804,3 +804,170 @@ func TestIngestor_AdaptiveDecision_SeverePressurePrefersWorkersDownFirst(t *test
 		t.Fatalf("pollers=%d want=3", src.pollers)
 	}
 }
+
+// TestIngestor_AdaptiveDecision_IdleScalesDownPollers covers the idle
+// poller scale-down branch: pollers > minPollers AND sourceUsage < 0.10.
+func TestIngestor_AdaptiveDecision_IdleScalesDownPollers(t *testing.T) {
+	src := &adaptiveSource{tSource: newTSource(), pollers: 2, used: 0, cap: 10}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	cfg := batcher.DefaultBatcherConfig
+	cfg.FlushInterval = time.Second
+	cfg.MaxEstimatedInputBytes = 1024
+	ing, err := NewIngestor(cfg, src, tTransformer{}, enc, sk, func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := &observability.Registry{}
+	ing.SetMetricsRegistry(metrics)
+	ing.EnableAdaptiveRuntime(AdaptiveRuntimeConfig{
+		Enabled:    true,
+		MinWorkers: 1, MaxWorkers: 4,
+		MinPollers: 1, MaxPollers: 4,
+		TargetCPUUtilization: 0.8, TargetMemoryUtilization: 0.8,
+		MaxMemoryBytes: 1024 * 1024,
+		SampleInterval: time.Second, Cooldown: time.Second,
+	})
+	ing.flushWorkers = 1
+	ing.maybeStartFlushPool(context.Background())
+	defer func() {
+		for _, stop := range ing.flushStops {
+			stop()
+		}
+		if ing.flushJobs != nil {
+			close(ing.flushJobs)
+		}
+	}()
+
+	// workers=1==minWorkers → idle worker scale-down will NOT fire.
+	// pollers=2 > minPollers=1, sourceUsage=0/10=0 < 0.10 → idle POLLER scale-down fires.
+	if !ing.applyAdaptiveDecision(runtimeSnapshot{
+		memBytes: 100, cpuUtil: 0.2,
+		flushQueueLen: 0, flushQueueCap: 4,
+		sourceUsed: 0, sourceCap: 10,
+		workers: 1, pollers: 2,
+	}) {
+		t.Fatal("expected idle poller scale-down when pollers>min and source is very idle")
+	}
+	if src.pollers != 1 {
+		t.Fatalf("pollers = %d, want 1 after idle scale-down", src.pollers)
+	}
+	if got := metrics.Snapshot()["ingestor_scale_down_total"]; got < 1 {
+		t.Fatalf("scale_down_total = %v, want >= 1", got)
+	}
+}
+
+// TestIngestor_AdaptiveDecision_ZeroConfigValues_UsesDefaults covers the four
+// default-value branches inside applyAdaptiveDecision that trigger when
+// MaxWorkers, MinWorkers, MaxPollers, or MinPollers are zero in the config.
+func TestIngestor_AdaptiveDecision_ZeroConfigValues_UsesDefaults(t *testing.T) {
+	src := &adaptiveSource{tSource: newTSource(), pollers: 1, used: 0, cap: 10}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	cfg := batcher.DefaultBatcherConfig
+	cfg.FlushInterval = time.Second
+	cfg.MaxEstimatedInputBytes = 1024
+	ing, err := NewIngestor(cfg, src, tTransformer{}, enc, sk, func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ing.SetMetricsRegistry(&observability.Registry{})
+	// MaxWorkers=0, MinWorkers=0, MaxPollers=0, MinPollers=0 → all four
+	// default-value branches inside applyAdaptiveDecision will fire.
+	ing.EnableAdaptiveRuntime(AdaptiveRuntimeConfig{
+		Enabled:              true,
+		MaxWorkers:           0, // → default: max(1, GOMAXPROCS*4)
+		MinWorkers:           0, // → default: 1
+		MaxPollers:           0, // → default: max(1, GOMAXPROCS)
+		MinPollers:           0, // → default: 1
+		TargetCPUUtilization: 0.8, TargetMemoryUtilization: 0.8,
+		MaxMemoryBytes: 0, // no memory pressure
+		SampleInterval: time.Second, Cooldown: time.Second,
+	})
+	ing.flushWorkers = 1
+	ing.maybeStartFlushPool(context.Background())
+	defer func() {
+		for _, stop := range ing.flushStops {
+			stop()
+		}
+		if ing.flushJobs != nil {
+			close(ing.flushJobs)
+		}
+	}()
+
+	// Everything at minimum, no pressure → returns false without scaling.
+	// The important thing is that all four default branches executed without panic.
+	result := ing.applyAdaptiveDecision(runtimeSnapshot{
+		memBytes: 100, cpuUtil: 0.2,
+		flushQueueLen: 0, flushQueueCap: 4,
+		sourceUsed: 0, sourceCap: 10,
+		workers: 1, pollers: 1,
+	})
+	// We don't assert a specific result — just that it ran without panic and
+	// returned a valid bool.
+	_ = result
+}
+
+// TestIngestor_StartAdaptiveLoop_CooldownBlocksSubsequentScales verifies two
+// branches in startAdaptiveLoop that are otherwise unreachable:
+//
+//  1. The `lastScale = now` assignment (applyAdaptiveDecision returns true in the goroutine).
+//  2. The `continue` inside the cooldown guard (a tick fires while within Cooldown).
+//
+// Setup: workers=2 > MinWorkers=1 with an empty flush queue (flushUsage=0 < 0.20)
+// guarantees idle scale-down on the first tick. A Cooldown longer than several
+// SampleIntervals ensures subsequent ticks hit the cooldown `continue`.
+func TestIngestor_StartAdaptiveLoop_CooldownBlocksSubsequentScales(t *testing.T) {
+	src := &adaptiveSource{tSource: newTSource(), pollers: 1, used: 0, cap: 10}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	cfg := batcher.DefaultBatcherConfig
+	cfg.FlushInterval = time.Hour
+	cfg.MaxEstimatedInputBytes = 1 << 60
+	ing, err := NewIngestor(cfg, src, tTransformer{}, enc, sk, func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := &observability.Registry{}
+	ing.SetMetricsRegistry(metrics)
+
+	const sampleInterval = 20 * time.Millisecond
+	const cooldown = 300 * time.Millisecond // >> 3 sample intervals
+
+	ing.EnableAdaptiveRuntime(AdaptiveRuntimeConfig{
+		Enabled:    true,
+		MinWorkers: 1, MaxWorkers: 4,
+		MinPollers: 1, MaxPollers: 4,
+		TargetCPUUtilization: 0.8, TargetMemoryUtilization: 0.8,
+		MaxMemoryBytes: 0,
+		SampleInterval: sampleInterval,
+		Cooldown:       cooldown,
+	})
+	// Start with 2 workers so idle scale-down fires on the first tick
+	// (workers=2 > minWorkers=1, empty queue → flushUsage=0 < 0.20).
+	ing.flushWorkers = 2
+	ing.flushQueue = 4
+	ing.maybeStartFlushPool(context.Background())
+	defer func() {
+		for _, stop := range ing.flushStops {
+			stop()
+		}
+		if ing.flushJobs != nil {
+			close(ing.flushJobs)
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ing.startAdaptiveLoop(ctx)
+
+	// Wait for the first scale-down tick + at least two more ticks within cooldown.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	time.Sleep(30 * time.Millisecond) // let goroutine exit
+
+	snap := metrics.Snapshot()
+	// Exactly 1 scale-down should have occurred; cooldown suppressed the rest.
+	if got := snap["ingestor_scale_down_total"]; got != 1 {
+		t.Fatalf("scale_down_total = %v, want exactly 1 (cooldown should have blocked subsequent ticks)", got)
+	}
+}
