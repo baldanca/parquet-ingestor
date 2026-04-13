@@ -1652,7 +1652,7 @@ func TestRun_FatalErrorFromFlush(t *testing.T) {
 
 	cfg := batcher.DefaultBatcherConfig
 	cfg.FlushInterval = time.Millisecond // flush immediately
-	cfg.MaxItems = 1                      // flush on first message
+	cfg.MaxItems = 1                     // flush on first message
 	ing, err := NewIngestor(cfg, src, tTransformer{}, enc, sk,
 		func(_ context.Context, _ batcher.Batch[int]) (string, error) {
 			return "", fatalKeyFuncErr

@@ -69,8 +69,8 @@ func (a ackableMessage) AckHandle() ackHandle {
 	return ackHandle{id: a.id, receiptHandle: a.receiptHandle}
 }
 
-func (a ackableMessage) Data() Envelope           { return Envelope{} }
-func (a ackableMessage) EstimatedSizeBytes() (int64, bool) { return 0, false }
+func (a ackableMessage) Data() Envelope                        { return Envelope{} }
+func (a ackableMessage) EstimatedSizeBytes() (int64, bool)     { return 0, false }
 func (a ackableMessage) Fail(_ context.Context, _ error) error { return nil }
 func (a ackableMessage) AckMeta() (AckMetadata, bool) {
 	return AckMetadata{ID: a.id, Handle: a.receiptHandle}, true
