@@ -45,7 +45,13 @@ func (i *Ingestor[iType]) startAdaptiveLoop(ctx context.Context) {
 	if i.adaptive == nil || !i.adaptive.Enabled {
 		return
 	}
+	// Use a child context so flushRemainingOnStop can stop the adaptive loop
+	// before closing the flush jobs channel, preventing a concurrent
+	// SetFlushWorkers call from racing with shutdown cleanup.
+	adaptiveCtx, stop := context.WithCancel(ctx)
+	i.adaptiveStop = stop
 	go func() {
+		defer stop()
 		ticker := time.NewTicker(i.adaptive.SampleInterval)
 		defer ticker.Stop()
 		var lastScale time.Time
@@ -53,7 +59,7 @@ func (i *Ingestor[iType]) startAdaptiveLoop(ctx context.Context) {
 		prevTS := time.Now()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-adaptiveCtx.Done():
 				return
 			case <-ticker.C:
 				now := time.Now()
@@ -126,9 +132,10 @@ func (i *Ingestor[iType]) applyAdaptiveDecision(s runtimeSnapshot) bool {
 
 	workers := s.workers
 	pollers := s.pollers
+	gomaxprocs := runtime.GOMAXPROCS(0)
 	maxWorkers := cfg.MaxWorkers
 	if maxWorkers < 1 {
-		maxWorkers = max(1, runtime.GOMAXPROCS(0)*4)
+		maxWorkers = max(1, gomaxprocs*4)
 	}
 	minWorkers := cfg.MinWorkers
 	if minWorkers < 1 {
@@ -136,7 +143,7 @@ func (i *Ingestor[iType]) applyAdaptiveDecision(s runtimeSnapshot) bool {
 	}
 	maxPollers := cfg.MaxPollers
 	if maxPollers < 1 {
-		maxPollers = max(1, runtime.GOMAXPROCS(0))
+		maxPollers = max(1, gomaxprocs)
 	}
 	minPollers := cfg.MinPollers
 	if minPollers < 1 {
@@ -190,7 +197,7 @@ func (i *Ingestor[iType]) applyAdaptiveDecision(s runtimeSnapshot) bool {
 		}
 	}
 
-	if flushUsage >= 0.85 && s.cpuUtil < cfg.TargetCPUUtilization-0.05 && (cfg.MaxMemoryBytes == 0 || memPressure < cfg.TargetMemoryUtilization-0.05) {
+	if flushUsage >= 0.70 && s.cpuUtil < cfg.TargetCPUUtilization && (cfg.MaxMemoryBytes == 0 || memPressure < cfg.TargetMemoryUtilization) {
 		if scaled, from, to := i.adjustFlushWorkers(workers, +1, minWorkers, maxWorkers); scaled {
 			i.metrics.AddCounter("ingestor_scale_up_total", 1)
 			i.logger.Info("ingestor.adaptive.scale_up_workers", "from", from, "to", to, "flush_usage", flushUsage)
@@ -198,10 +205,15 @@ func (i *Ingestor[iType]) applyAdaptiveDecision(s runtimeSnapshot) bool {
 		}
 	}
 
-	if flushUsage >= 0.70 && s.cpuUtil < cfg.TargetCPUUtilization && (cfg.MaxMemoryBytes == 0 || memPressure < cfg.TargetMemoryUtilization) {
+	// Single-worker mode: when flushJobs is nil there is no flush queue, so
+	// flushUsage is always 0 and the condition above never fires. Use source
+	// buffer pressure as a proxy signal to still scale workers up when needed.
+	if s.flushQueueCap == 0 && sourceUsage >= 0.60 &&
+		s.cpuUtil < cfg.TargetCPUUtilization &&
+		(cfg.MaxMemoryBytes == 0 || memPressure < cfg.TargetMemoryUtilization) {
 		if scaled, from, to := i.adjustFlushWorkers(workers, +1, minWorkers, maxWorkers); scaled {
 			i.metrics.AddCounter("ingestor_scale_up_total", 1)
-			i.logger.Info("ingestor.adaptive.scale_up_workers", "from", from, "to", to, "flush_usage", flushUsage)
+			i.logger.Info("ingestor.adaptive.scale_up_workers_source_pressure", "from", from, "to", to, "source_usage", sourceUsage)
 			return true
 		}
 	}
@@ -217,6 +229,29 @@ func (i *Ingestor[iType]) applyAdaptiveDecision(s runtimeSnapshot) bool {
 		if scaled, from, to := i.adjustPollers(pollers, +1, minPollers, maxPollers); scaled {
 			i.metrics.AddCounter("ingestor_scale_up_total", 1)
 			i.logger.Info("ingestor.adaptive.scale_up_pollers", "from", from, "to", to, "source_usage", sourceUsage, "flush_usage", flushUsage)
+			return true
+		}
+	}
+
+	// Idle scale-down: return workers and pollers towards the configured minimum
+	// when the load that triggered a previous scale-up has since subsided.
+	// Each cooldown period reduces by one, preventing oscillation while still
+	// converging to the baseline over time.
+	//
+	// These checks run last so that scale-up decisions always take priority when
+	// both a low-load and a high-load signal are present in the same snapshot.
+	if workers > minWorkers && flushUsage < 0.20 {
+		if scaled, from, to := i.adjustFlushWorkers(workers, -1, minWorkers, maxWorkers); scaled {
+			i.metrics.AddCounter("ingestor_scale_down_total", 1)
+			i.logger.Info("ingestor.adaptive.scale_down_workers_idle", "from", from, "to", to, "flush_usage", flushUsage)
+			return true
+		}
+	}
+
+	if pollers > minPollers && sourceUsage < 0.10 {
+		if scaled, from, to := i.adjustPollers(pollers, -1, minPollers, maxPollers); scaled {
+			i.metrics.AddCounter("ingestor_scale_down_total", 1)
+			i.logger.Info("ingestor.adaptive.scale_down_pollers_idle", "from", from, "to", to, "source_usage", sourceUsage)
 			return true
 		}
 	}

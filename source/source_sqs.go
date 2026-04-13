@@ -61,6 +61,17 @@ type SourceSQSConfig struct {
 	// issue to be investigated before the message is retried. Set to 0 to make
 	// the message immediately re-deliverable.
 	FailVisibilityTimeoutSeconds *int32
+
+	// IncludeAttributes, when true, requests all SQS system attributes and
+	// user MessageAttributes and surfaces them via Envelope.Attributes.
+	// Disabled by default; only enable when the Transformer needs per-message
+	// metadata such as ApproximateReceiveCount, SentTimestamp, or custom
+	// MessageAttributes set by the message producer.
+	//
+	// When false (default), no attribute data is requested from SQS, which
+	// reduces per-message payload size and avoids an allocation per message.
+	IncludeAttributes bool
+
 	// Logger receives structured log events from the SQS source. Defaults to
 	// a no-op logger when nil.
 	Logger observability.Logger
@@ -153,16 +164,18 @@ func NewSourceSQSWithConfig(ctx context.Context, client sqsAPI, queueURL string,
 	ctx, cancel := context.WithCancel(ctx)
 
 	s := &SourceSQS{
-		cfg:              cfg,
-		client:           client,
-		queueURL:         queueURL,
-		bufCh:            make(chan *sqstypes.Message, cfg.BufSize),
-		rootCtx:          ctx,
-		cancel:           cancel,
-		recvMsgAttrNames: []string{"All"},
-		recvAttrNames:    []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameAll},
+		cfg:      cfg,
+		client:   client,
+		queueURL: queueURL,
+		bufCh:    make(chan *sqstypes.Message, cfg.BufSize),
+		rootCtx:  ctx,
+		cancel:   cancel,
 	}
 	s.queueURLPtr = &s.queueURL
+	if cfg.IncludeAttributes {
+		s.recvMsgAttrNames = []string{"All"}
+		s.recvAttrNames = []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameAll}
+	}
 	s.cfg.Metrics.SetGauge("source_sqs_pollers", int64(cfg.Pollers))
 	s.cfg.Metrics.SetGauge("source_sqs_buffer_capacity", int64(cfg.BufSize))
 	s.startPollers(cfg.Pollers)
@@ -456,7 +469,39 @@ type message struct {
 	m   *sqstypes.Message
 }
 
-func (m *message) Data() Envelope                    { return Envelope{Payload: aws.ToString(m.m.Body)} }
+func (m *message) Data() Envelope {
+	if !m.src.cfg.IncludeAttributes {
+		return Envelope{Payload: aws.ToString(m.m.Body)}
+	}
+	return Envelope{
+		Payload:    aws.ToString(m.m.Body),
+		Attributes: extractSQSAttributes(m.m),
+	}
+}
+
+// extractSQSAttributes converts SQS system attributes and user
+// MessageAttributes into a flat string map. Binary MessageAttributes are
+// skipped because they have no natural string representation. The MessageId
+// is included under the key "MessageId".
+func extractSQSAttributes(m *sqstypes.Message) map[string]string {
+	if len(m.Attributes) == 0 && len(m.MessageAttributes) == 0 && m.MessageId == nil {
+		return nil
+	}
+	attrs := make(map[string]string, len(m.Attributes)+len(m.MessageAttributes)+1)
+	for k, v := range m.Attributes {
+		attrs[string(k)] = v
+	}
+	for k, v := range m.MessageAttributes {
+		// StringValue is set for both String and Number data types.
+		if v.StringValue != nil {
+			attrs[k] = aws.ToString(v.StringValue)
+		}
+	}
+	if m.MessageId != nil {
+		attrs["MessageId"] = aws.ToString(m.MessageId)
+	}
+	return attrs
+}
 func (m *message) EstimatedSizeBytes() (int64, bool) { return int64(len(aws.ToString(m.m.Body))), true }
 func (m *message) Fail(ctx context.Context, reason error) error {
 	if m.src.cfg.FailVisibilityTimeoutSeconds == nil {
