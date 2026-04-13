@@ -66,7 +66,7 @@ type ackableMessage struct {
 }
 
 func (a ackableMessage) AckHandle() ackHandle {
-	return ackHandle{id: a.id, receiptHandle: a.receiptHandle}
+	return ackHandle(a)
 }
 
 func (a ackableMessage) Data() Envelope                        { return Envelope{} }
