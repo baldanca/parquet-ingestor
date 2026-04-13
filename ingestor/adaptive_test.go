@@ -935,13 +935,13 @@ func TestIngestor_StartAdaptiveLoop_CooldownBlocksSubsequentScales(t *testing.T)
 	const cooldown = 300 * time.Millisecond // >> 3 sample intervals
 
 	ing.EnableAdaptiveRuntime(AdaptiveRuntimeConfig{
-		Enabled:              true,
-		MinWorkers:           1, MaxWorkers: 4,
-		MinPollers:           1, MaxPollers: 4,
+		Enabled:    true,
+		MinWorkers: 1, MaxWorkers: 4,
+		MinPollers: 1, MaxPollers: 4,
 		TargetCPUUtilization: 0.8, TargetMemoryUtilization: 0.8,
-		MaxMemoryBytes:       0,
-		SampleInterval:       sampleInterval,
-		Cooldown:             cooldown,
+		MaxMemoryBytes: 0,
+		SampleInterval: sampleInterval,
+		Cooldown:       cooldown,
 	})
 	// Start with 2 workers so idle scale-down fires on the first tick
 	// (workers=2 > minWorkers=1, empty queue → flushUsage=0 < 0.20).
