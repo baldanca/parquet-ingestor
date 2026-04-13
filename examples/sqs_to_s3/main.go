@@ -97,16 +97,16 @@ type Record struct {
 
 type jsonTransformer struct{}
 
-func (jsonTransformer) Transform(ctx context.Context, env source.Envelope) (Record, error) {
+func (jsonTransformer) Transform(ctx context.Context, env source.Envelope) ([]Record, error) {
 	var out Record
 	b, ok := env.Payload.([]byte)
 	if !ok {
-		return out, fmt.Errorf("payload is not []byte")
+		return nil, fmt.Errorf("payload is not []byte")
 	}
 	if err := json.Unmarshal(b, &out); err != nil {
-		return out, err
+		return nil, err
 	}
-	return out, nil
+	return []Record{out}, nil
 }
 
 func ptrI32(v int32) *int32 { return &v }

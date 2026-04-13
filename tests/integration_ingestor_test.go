@@ -120,17 +120,20 @@ func (s *noStreamSink) Write(ctx context.Context, req sink.WriteRequest) error {
 
 type jsonTransformer struct{}
 
-func (t jsonTransformer) Transform(ctx context.Context, env source.Envelope) (testItem, error) {
+func (t jsonTransformer) Transform(ctx context.Context, env source.Envelope) ([]testItem, error) {
 	var it testItem
+	var err error
 	if b, ok := env.Payload.([]byte); ok {
-		return it, json.Unmarshal(b, &it)
+		err = json.Unmarshal(b, &it)
+	} else if s, ok := env.Payload.(string); ok {
+		err = json.Unmarshal([]byte(s), &it)
+	} else {
+		return nil, errors.New("unsupported payload type")
 	}
-	switch v := env.Payload.(type) {
-	case string:
-		return it, json.Unmarshal([]byte(v), &it)
-	default:
-		return it, errors.New("unsupported payload type")
+	if err != nil {
+		return nil, err
 	}
+	return []testItem{it}, nil
 }
 
 func waitForAcks(t *testing.T, src *memSource, want int64, timeout time.Duration) {
