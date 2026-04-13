@@ -79,9 +79,10 @@ type Ingestor[iType any] struct {
 	flushMu      sync.Mutex
 	flushStops   []context.CancelFunc
 
-	logger   observability.Logger
-	metrics  *observability.Registry
-	adaptive *AdaptiveRuntimeConfig
+	logger       observability.Logger
+	metrics      *observability.Registry
+	adaptive     *AdaptiveRuntimeConfig
+	adaptiveStop context.CancelFunc // cancels the adaptive goroutine; nil when adaptive is disabled
 
 	inputLogSeq       atomic.Uint64
 	transformedLogSeq atomic.Uint64
@@ -647,6 +648,12 @@ func (i *Ingestor[iType]) startJobLease(parent context.Context, ext source.Visib
 }
 
 func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
+	// Stop the adaptive loop first so it cannot call SetFlushWorkers or
+	// SetPollers concurrently with the channel close below.
+	if i.adaptiveStop != nil {
+		i.adaptiveStop()
+	}
+
 	timeout := i.shutdownTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
