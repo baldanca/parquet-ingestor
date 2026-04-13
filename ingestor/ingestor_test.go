@@ -11,6 +11,7 @@ import (
 
 	"github.com/baldanca/parquet-ingestor/batcher"
 	"github.com/baldanca/parquet-ingestor/encoder"
+	"github.com/baldanca/parquet-ingestor/observability"
 	"github.com/baldanca/parquet-ingestor/sink"
 	"github.com/baldanca/parquet-ingestor/source"
 	"github.com/baldanca/parquet-ingestor/transformer"
@@ -821,5 +822,96 @@ func TestIngestor_Run_Cancel_FlushesRemainingBatch(t *testing.T) {
 	}
 	if w := atomic.LoadInt32(&sk.writeCalls) + atomic.LoadInt32(&sk.writeStreamCalls); w != 1 {
 		t.Fatalf("expected exactly 1 write on shutdown flush, got %d", w)
+	}
+}
+
+// --- handleRuntimeError ---
+
+// captureLoggerSimple is a minimal logger that records the last Error event name.
+type captureLoggerSimple struct {
+	lastEvent string
+	lastArgs  []any
+}
+
+func (l *captureLoggerSimple) Debug(string, ...any) {}
+func (l *captureLoggerSimple) Info(string, ...any)  {}
+func (l *captureLoggerSimple) Warn(string, ...any)  {}
+func (l *captureLoggerSimple) Error(msg string, args ...any) {
+	l.lastEvent = msg
+	l.lastArgs = append([]any(nil), args...)
+}
+
+func TestHandleRuntimeError_NilError_IsNoop(t *testing.T) {
+	lg := &captureLoggerSimple{}
+	metrics := &observability.Registry{}
+	ing := &Ingestor[int]{logger: lg, metrics: metrics}
+	ing.handleRuntimeError("some.event", nil)
+
+	if lg.lastEvent != "" {
+		t.Fatalf("expected no log call for nil error, got event=%q", lg.lastEvent)
+	}
+	if snap := metrics.Snapshot(); snap["ingestor_runtime_errors_total"] != 0 {
+		t.Fatalf("counter must stay 0 for nil error, got %v", snap["ingestor_runtime_errors_total"])
+	}
+}
+
+func TestHandleRuntimeError_NoExtraArgs_IncrementCounter(t *testing.T) {
+	lg := &captureLoggerSimple{}
+	metrics := &observability.Registry{}
+	ing := &Ingestor[int]{logger: lg, metrics: metrics}
+	sentinel := errors.New("something broke")
+	ing.handleRuntimeError("my.event", sentinel)
+
+	if lg.lastEvent != "my.event" {
+		t.Fatalf("event = %q, want my.event", lg.lastEvent)
+	}
+	// Fast path: args = ["error", err] — no extra items beyond the error key-value.
+	if len(lg.lastArgs) != 2 || lg.lastArgs[0] != "error" || lg.lastArgs[1] != sentinel {
+		t.Fatalf("args = %v, want [\"error\", err]", lg.lastArgs)
+	}
+	if snap := metrics.Snapshot(); snap["ingestor_runtime_errors_total"] != 1 {
+		t.Fatalf("counter = %v, want 1", snap["ingestor_runtime_errors_total"])
+	}
+}
+
+func TestHandleRuntimeError_WithExtraArgs_ForwardsAll(t *testing.T) {
+	lg := &captureLoggerSimple{}
+	metrics := &observability.Registry{}
+	ing := &Ingestor[int]{logger: lg, metrics: metrics}
+	sentinel := errors.New("oops")
+	ing.handleRuntimeError("my.event", sentinel, "key", "value")
+
+	if lg.lastEvent != "my.event" {
+		t.Fatalf("event = %q, want my.event", lg.lastEvent)
+	}
+	// Should contain: "error", err, "key", "value"
+	if len(lg.lastArgs) != 4 {
+		t.Fatalf("args len = %d, want 4; args = %v", len(lg.lastArgs), lg.lastArgs)
+	}
+	if lg.lastArgs[0] != "error" || lg.lastArgs[1] != sentinel {
+		t.Fatalf("first pair = %v %v, want error/sentinel", lg.lastArgs[0], lg.lastArgs[1])
+	}
+	if lg.lastArgs[2] != "key" || lg.lastArgs[3] != "value" {
+		t.Fatalf("second pair = %v %v, want key/value", lg.lastArgs[2], lg.lastArgs[3])
+	}
+	if snap := metrics.Snapshot(); snap["ingestor_runtime_errors_total"] != 1 {
+		t.Fatalf("counter = %v, want 1", snap["ingestor_runtime_errors_total"])
+	}
+}
+
+// --- NewDefaultIngestor ---
+
+func TestNewDefaultIngestor_ReturnsValidIngestor(t *testing.T) {
+	src := newTSource()
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
+
+	ing, err := NewDefaultIngestor(src, tTransformer{}, enc, sk, keyFn)
+	if err != nil {
+		t.Fatalf("NewDefaultIngestor: %v", err)
+	}
+	if ing == nil {
+		t.Fatal("expected non-nil Ingestor")
 	}
 }

@@ -49,3 +49,71 @@ func TestRegistrySnapshot(t *testing.T) {
 		t.Fatalf("cpu_utilization = %v, want 0.55", got)
 	}
 }
+
+// TestRegistry_MetricCacheHit exercises the fast-path branches inside
+// intCounter, intGauge, and floatGauge that return the already-stored metric
+// when the same name is used more than once.
+func TestRegistry_MetricCacheHit(t *testing.T) {
+	r := &Registry{}
+	// First call creates the entry; second call must hit the Load fast-path.
+	r.AddCounter("cache_total", 1)
+	r.AddCounter("cache_total", 2)
+	if got := r.Snapshot()["cache_total"]; got != 3 {
+		t.Fatalf("counter after two increments = %v, want 3", got)
+	}
+
+	r.SetGauge("depth", 10)
+	r.SetGauge("depth", 20)
+	if got := r.Snapshot()["depth"]; got != 20 {
+		t.Fatalf("gauge = %v, want 20", got)
+	}
+
+	r.SetGaugeFloat("ratio", 0.1)
+	r.SetGaugeFloat("ratio", 0.9)
+	if got := r.Snapshot()["ratio"]; got != 0.9 {
+		t.Fatalf("float gauge = %v, want 0.9", got)
+	}
+}
+
+// TestRegistry_AddAdapter_NilIsIgnored verifies that passing nil to AddAdapter
+// does not panic and does not set the hasAdapters flag.
+func TestRegistry_AddAdapter_NilIsIgnored(t *testing.T) {
+	r := &Registry{}
+	r.AddAdapter(nil) // must not panic
+	if r.hasAdapters.Load() {
+		t.Fatal("hasAdapters must stay false after adding nil adapter")
+	}
+}
+
+// TestRegistry_HasAdapters_SetAfterFirstAdd verifies that the atomic fast-path
+// flag transitions from false to true once a real adapter is registered.
+func TestRegistry_HasAdapters_SetAfterFirstAdd(t *testing.T) {
+	r := &Registry{}
+	if r.hasAdapters.Load() {
+		t.Fatal("hasAdapters should be false on zero-value Registry")
+	}
+	r.AddAdapter(DatadogAdapter{Client: &nopDDClient{}})
+	if !r.hasAdapters.Load() {
+		t.Fatal("hasAdapters should be true after AddAdapter")
+	}
+}
+
+// TestDatadogAdapter_MetricName_NoPrefix verifies that when Prefix is empty the
+// metric name is returned unchanged.
+func TestDatadogAdapter_MetricName_NoPrefix(t *testing.T) {
+	d := DatadogAdapter{}
+	if got := d.metricName("foo_total"); got != "foo_total" {
+		t.Fatalf("metricName = %q, want %q", got, "foo_total")
+	}
+}
+
+// TestDatadogAdapter_SampleRate_OutOfRange verifies that a Rate > 1 is clamped
+// to 1.0 so DogStatsD receives a valid sample rate.
+func TestDatadogAdapter_SampleRate_OutOfRange(t *testing.T) {
+	dd := &captureDD{}
+	a := DatadogAdapter{Client: dd, Rate: 1.5}
+	a.AddCounter("x_total", 1)
+	if dd.lastRate != 1.0 {
+		t.Fatalf("sample rate = %v, want 1.0 for Rate=1.5", dd.lastRate)
+	}
+}
