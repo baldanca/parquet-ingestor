@@ -833,9 +833,9 @@ type captureLoggerSimple struct {
 	lastArgs  []any
 }
 
-func (l *captureLoggerSimple) Debug(string, ...any)  {}
-func (l *captureLoggerSimple) Info(string, ...any)   {}
-func (l *captureLoggerSimple) Warn(string, ...any)   {}
+func (l *captureLoggerSimple) Debug(string, ...any) {}
+func (l *captureLoggerSimple) Info(string, ...any)  {}
+func (l *captureLoggerSimple) Warn(string, ...any)  {}
 func (l *captureLoggerSimple) Error(msg string, args ...any) {
 	l.lastEvent = msg
 	l.lastArgs = append([]any(nil), args...)
