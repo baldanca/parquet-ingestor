@@ -78,7 +78,7 @@ func BenchmarkIngestorAdaptiveSnapshotRuntime(b *testing.B) {
 	prevCPU := readCPUTimeSeconds()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = ing.snapshotRuntime(time.Now(), prevTS, prevCPU)
+		_, _ = ing.snapshotRuntime(time.Now(), prevTS, prevCPU)
 	}
 }
 

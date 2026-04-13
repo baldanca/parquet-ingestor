@@ -231,6 +231,86 @@ func TestBatcher_Flush_ReusesBuffers(t *testing.T) {
 	_ = origItemsPtr
 }
 
+func TestBatcher_AddBatch_AddsAllItemsWithOneAck(t *testing.T) {
+	cfg := DefaultBatcherConfig
+	cfg.MaxEstimatedInputBytes = 1024
+	cfg.MaxItems = 0
+	cfg.ReuseBuffers = true
+
+	b, _ := NewBatcher[int](cfg)
+	now := time.Unix(0, 0)
+
+	flush := b.AddBatch(now, []int{1, 2, 3}, testMsg(), 30)
+	if flush {
+		t.Fatalf("should not flush yet")
+	}
+	if len(b.items) != 3 {
+		t.Fatalf("items=%d want 3", len(b.items))
+	}
+	if b.bytes != 30 {
+		t.Fatalf("bytes=%d want 30", b.bytes)
+	}
+	// ack group should have exactly one entry for the single source message
+	out := b.Flush()
+	if len(out.Items) != 3 {
+		t.Fatalf("flush items=%d want 3", len(out.Items))
+	}
+}
+
+func TestBatcher_AddBatch_FlushByMaxItemsAcrossExpansion(t *testing.T) {
+	cfg := DefaultBatcherConfig
+	cfg.MaxEstimatedInputBytes = 1 << 30
+	cfg.MaxItems = 5
+	cfg.ReuseBuffers = true
+
+	b, _ := NewBatcher[int](cfg)
+	now := time.Unix(0, 0)
+
+	// first message expands to 3 records — below MaxItems
+	if b.AddBatch(now, []int{1, 2, 3}, testMsg(), 10) {
+		t.Fatalf("should not flush at 3 items")
+	}
+	// second message expands to 3 more records — crosses MaxItems=5
+	if !b.AddBatch(now, []int{4, 5, 6}, testMsg(), 10) {
+		t.Fatalf("expected flush at 6 items (>= MaxItems=5)")
+	}
+	out := b.Flush()
+	if len(out.Items) != 6 {
+		t.Fatalf("expected 6 items, got %d", len(out.Items))
+	}
+}
+
+func TestBatcher_AddBatch_FlushByBytes(t *testing.T) {
+	cfg := DefaultBatcherConfig
+	cfg.MaxEstimatedInputBytes = 100
+	cfg.MaxItems = 0
+	cfg.ReuseBuffers = true
+
+	b, _ := NewBatcher[int](cfg)
+	now := time.Unix(0, 0)
+
+	if b.AddBatch(now, []int{1, 2}, testMsg(), 60) {
+		t.Fatalf("should not flush at 60 bytes")
+	}
+	if !b.AddBatch(now, []int{3, 4}, testMsg(), 40) {
+		t.Fatalf("expected flush at 100 bytes")
+	}
+}
+
+func TestBatcher_AddBatch_NegativeSizeClamped(t *testing.T) {
+	cfg := DefaultBatcherConfig
+	cfg.MaxEstimatedInputBytes = 1
+	cfg.ReuseBuffers = true
+
+	b, _ := NewBatcher[int](cfg)
+	now := time.Unix(0, 0)
+
+	b.AddBatch(now, []int{1}, testMsg(), -999)
+	if b.bytes != 0 {
+		t.Fatalf("bytes=%d want 0", b.bytes)
+	}
+}
+
 func benchMsg() source.Message {
 	var m source.Message
 	return m

@@ -97,9 +97,12 @@ func (e ParquetEncoder[iType]) Encode(ctx context.Context, items []iType) ([]byt
 	buf.Reset()
 
 	if n := len(items); n > 0 {
-		grow := n * 128
-		if grow > 4<<20 {
-			grow = 4 << 20
+		// Estimate 64 bytes per record; cap at 1 MiB to avoid over-committing
+		// memory for batches of small items.  The buffer will grow automatically
+		// if the actual output is larger.
+		grow := n * 64
+		if grow > 1<<20 {
+			grow = 1 << 20
 		}
 		buf.Grow(grow)
 	}

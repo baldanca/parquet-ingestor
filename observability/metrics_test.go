@@ -1,6 +1,36 @@
 package observability
 
-import "testing"
+import (
+	"testing"
+)
+
+// BenchmarkRegistry_AddCounter_NoAdapters measures the hot path: a registry
+// with no adapters registered. This is the most common production case when
+// only the in-process Snapshot is consumed (e.g. no Datadog sidecar).
+func BenchmarkRegistry_AddCounter_NoAdapters(b *testing.B) {
+	r := &Registry{}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		r.AddCounter("ingestor_messages_received_total", 1)
+	}
+}
+
+// BenchmarkRegistry_AddCounter_WithAdapter measures the fanout path when one
+// adapter is registered. Validates that the fast-path guard does not regress
+// the adapter case.
+func BenchmarkRegistry_AddCounter_WithAdapter(b *testing.B) {
+	r := &Registry{}
+	r.AddAdapter(DatadogAdapter{Client: &nopDDClient{}})
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		r.AddCounter("ingestor_messages_received_total", 1)
+	}
+}
+
+type nopDDClient struct{}
+
+func (nopDDClient) Count(string, int64, []string, float64) error  { return nil }
+func (nopDDClient) Gauge(string, float64, []string, float64) error { return nil }
 
 func TestRegistrySnapshot(t *testing.T) {
 	r := &Registry{}

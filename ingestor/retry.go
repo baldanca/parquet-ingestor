@@ -2,11 +2,16 @@ package ingestor
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
 
-// RetryPolicy wraps an operation with retries.
+// RetryPolicy wraps an operation with conditional retries. Implementations
+// must honour context cancellation and deadlines: when ctx is cancelled, Do
+// must return ctx.Err() promptly without starting another attempt.
+//
+// RetryPolicy is used for both sink writes (SetRetryPolicy) and source
+// acknowledgements (SetAckRetryPolicy).
 type RetryPolicy interface {
 	Do(ctx context.Context, fn func(ctx context.Context) error) error
 }
@@ -20,10 +25,17 @@ func (nopRetry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 	return fn(ctx)
 }
 
-// SimpleRetry retries an operation using exponential backoff.
+// SimpleRetry retries fn up to Attempts times using exponential backoff.
 //
-// It retries on any error returned by fn. If you need conditional retries,
-// wrap fn and decide which errors to return.
+// It retries on any non-nil error. To retry only on specific errors, wrap fn
+// and return nil for errors you want to swallow.
+//
+// Delay behaviour:
+//   - First failure sleeps BaseDelay (default 50 ms when only MaxDelay is set).
+//   - Each subsequent delay doubles, capped at MaxDelay (default 2 s).
+//   - When Jitter is true, each sleep is scaled by a random factor in [0.8, 1.2]
+//     to spread retries across concurrent callers.
+//   - Setting both BaseDelay and MaxDelay to 0 retries immediately with no sleep.
 type SimpleRetry struct {
 	Attempts  int
 	BaseDelay time.Duration

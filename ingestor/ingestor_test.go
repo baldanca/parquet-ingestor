@@ -94,11 +94,11 @@ type tTransformer struct {
 	fail bool
 }
 
-func (t tTransformer) Transform(ctx context.Context, in source.Envelope) (int, error) {
+func (t tTransformer) Transform(ctx context.Context, in source.Envelope) ([]int, error) {
 	if t.fail {
-		return 0, errors.New("transform fail")
+		return nil, errors.New("transform fail")
 	}
-	return 7, nil
+	return []int{7}, nil
 }
 
 var _ transformer.Transformer[int] = tTransformer{}
@@ -398,7 +398,9 @@ var _ source.Sourcer = (*bSource)(nil)
 
 type bTransformer struct{}
 
-func (bTransformer) Transform(ctx context.Context, in source.Envelope) (int, error) { return 1, nil }
+func (bTransformer) Transform(ctx context.Context, in source.Envelope) ([]int, error) {
+	return []int{1}, nil
+}
 
 var _ transformer.Transformer[int] = bTransformer{}
 
@@ -553,6 +555,110 @@ func BenchmarkIngestor_FlushOnly_Streaming(b *testing.B) {
 //
 // Additional tests (fixed config fields)
 //
+
+// tTransformerMulti returns n copies of a fixed value so we can test 1:n expansion.
+type tTransformerMulti struct {
+	n int // records produced per message
+}
+
+func (t tTransformerMulti) Transform(ctx context.Context, in source.Envelope) ([]int, error) {
+	out := make([]int, t.n)
+	for i := range out {
+		out[i] = i + 1
+	}
+	return out, nil
+}
+
+var _ transformer.Transformer[int] = tTransformerMulti{}
+
+// tTransformerDrop always returns an empty slice (drop).
+type tTransformerDrop struct{}
+
+func (tTransformerDrop) Transform(ctx context.Context, in source.Envelope) ([]int, error) {
+	return nil, nil
+}
+
+var _ transformer.Transformer[int] = tTransformerDrop{}
+
+func TestIngestor_processMessage_OneToMany_AddsAllRecordsOneAck(t *testing.T) {
+	src := newTSource()
+	tr := tTransformerMulti{n: 3}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
+
+	cfg := batcher.BatcherConfig{
+		MaxEstimatedInputBytes: 1 << 30,
+		FlushInterval:          time.Hour,
+		ReuseBuffers:           true,
+	}
+
+	ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+
+	msg := &tMsg{env: source.Envelope{Payload: "x"}, size: 10, sizeOK: true,
+		meta: source.AckMetadata{ID: "1", Handle: "h1"}}
+
+	flushNow, err := ing.processMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if flushNow {
+		t.Fatalf("unexpected flush")
+	}
+
+	// batcher should have 3 records from 1 message
+	batch := ing.batcher.Flush()
+	if len(batch.Items) != 3 {
+		t.Fatalf("items=%d want 3", len(batch.Items))
+	}
+}
+
+func TestIngestor_processMessage_Drop_AckImmediately(t *testing.T) {
+	src := newTSource()
+	tr := tTransformerDrop{}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	keyFn := func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil }
+
+	cfg := batcher.BatcherConfig{
+		MaxEstimatedInputBytes: 1 << 30,
+		FlushInterval:          time.Hour,
+		ReuseBuffers:           true,
+	}
+
+	ing, err := NewIngestor(cfg, src, tr, enc, sk, keyFn)
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	// mark writeDone so AckBatch succeeds
+	src.writeDone.Store(true)
+	ing.SetAckRetryPolicy(nopRetry{})
+
+	msg := &tMsg{env: source.Envelope{Payload: "x"}, size: 10, sizeOK: true,
+		meta: source.AckMetadata{ID: "2", Handle: "h2"}}
+
+	flushNow, err := ing.processMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if flushNow {
+		t.Fatalf("unexpected flush for dropped message")
+	}
+
+	// source should have been acked immediately (1 call)
+	if got := atomic.LoadInt32(&src.ackCalls); got != 1 {
+		t.Fatalf("ackCalls=%d want 1", got)
+	}
+
+	// batcher should be empty
+	batch := ing.batcher.Flush()
+	if len(batch.Items) != 0 {
+		t.Fatalf("expected empty batch for dropped message, got %d items", len(batch.Items))
+	}
+}
 
 func TestIngestor_flush_KeyFuncError_DoesNotAckAndReturnsError(t *testing.T) {
 	src := newTSource()
