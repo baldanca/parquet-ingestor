@@ -29,7 +29,7 @@ func BenchmarkRegistry_AddCounter_WithAdapter(b *testing.B) {
 
 type nopDDClient struct{}
 
-func (nopDDClient) Count(string, int64, []string, float64) error  { return nil }
+func (nopDDClient) Count(string, int64, []string, float64) error   { return nil }
 func (nopDDClient) Gauge(string, float64, []string, float64) error { return nil }
 
 func TestRegistrySnapshot(t *testing.T) {

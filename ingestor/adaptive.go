@@ -269,4 +269,3 @@ func readCPUTimeSeconds() float64 {
 	runtimemetrics.Read(samples[:])
 	return samples[0].Value.Float64()
 }
-
