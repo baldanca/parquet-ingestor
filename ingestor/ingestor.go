@@ -79,9 +79,9 @@ type Ingestor[iType any] struct {
 	flushMu      sync.Mutex
 	flushStops   []context.CancelFunc
 
-	logger      observability.Logger
-	metrics     *observability.Registry
-	adaptive    *AdaptiveRuntimeConfig
+	logger       observability.Logger
+	metrics      *observability.Registry
+	adaptive     *AdaptiveRuntimeConfig
 	adaptiveStop context.CancelFunc // cancels the adaptive goroutine; nil when adaptive is disabled
 
 	inputLogSeq       atomic.Uint64
