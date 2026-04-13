@@ -9,30 +9,38 @@ import (
 type intMetric struct{ v atomic.Int64 }
 type floatMetric struct{ v atomic.Uint64 }
 
-// Metrics is the common metrics contract used by the project.
+// Metrics is the common metrics contract used throughout the project.
+// All metric names follow snake_case. Counters end in _total.
 type Metrics interface {
+	// AddCounter increments a cumulative counter by delta.
 	AddCounter(name string, delta int64)
+	// SetGauge sets a point-in-time integer gauge.
 	SetGauge(name string, value int64)
+	// SetGaugeFloat sets a point-in-time float gauge.
 	SetGaugeFloat(name string, value float64)
 }
 
-// Adapter is an external metrics sink that receives the same metric updates
-// recorded in the local registry. Examples: DogStatsD/Datadog, OTEL bridges,
-// custom internal collectors.
+// Adapter is an external metrics sink. Registered adapters receive every
+// counter and gauge update recorded in the Registry, allowing forwarding to
+// Datadog, OpenTelemetry, Prometheus, or any custom backend.
+// Implementations must be safe for concurrent use.
 type Adapter interface {
 	Metrics
 }
 
-// Registry is a lightweight in-process metrics registry.
+// Registry is a lightweight in-process metrics store. It records values
+// locally (queryable via Snapshot) and fans them out to registered Adapters.
 //
-// It stores metrics locally and can fan them out to optional adapters.
+// The zero value is ready to use; no initialisation is required.
+// Registry is safe for concurrent use.
 type Registry struct {
 	counters sync.Map // map[string]*intMetric
 	gauges   sync.Map // map[string]*intMetric
 	floats   sync.Map // map[string]*floatMetric
 
-	adaptersMu sync.RWMutex
-	adapters   []Adapter
+	adaptersMu  sync.RWMutex
+	adapters    []Adapter
+	hasAdapters atomic.Bool // true once at least one adapter is registered
 }
 
 func (r *Registry) intCounter(name string) *intMetric {
@@ -70,13 +78,19 @@ func (r *Registry) AddAdapter(a Adapter) {
 	r.adaptersMu.Lock()
 	defer r.adaptersMu.Unlock()
 	r.adapters = append(r.adapters, a)
+	r.hasAdapters.Store(true)
 }
 
 func (r *Registry) fanout(fn func(Adapter)) {
+	// Fast path: skip lock acquisition entirely when no adapters are registered.
+	// This is the common case for the in-process-only registry used in tests
+	// and deployments that only consume the Snapshot output.
+	if !r.hasAdapters.Load() {
+		return
+	}
 	r.adaptersMu.RLock()
-	adapters := append([]Adapter(nil), r.adapters...)
-	r.adaptersMu.RUnlock()
-	for _, a := range adapters {
+	defer r.adaptersMu.RUnlock()
+	for _, a := range r.adapters {
 		fn(a)
 	}
 }
@@ -113,13 +127,21 @@ func (r *Registry) Snapshot() map[string]float64 {
 	return out
 }
 
-// DatadogClient is the minimal contract required by DatadogAdapter.
+// DatadogClient is the minimal subset of the DataDog DogStatsD client
+// required by DatadogAdapter. It is satisfied by *statsd.Client from
+// github.com/DataDog/datadog-go/v5/statsd.
 type DatadogClient interface {
 	Count(name string, value int64, tags []string, rate float64) error
 	Gauge(name string, value float64, tags []string, rate float64) error
 }
 
 // DatadogAdapter forwards metrics to a DogStatsD-compatible client.
+// Register it with Registry.AddAdapter to enable Datadog integration.
+//
+// Prefix, when non-empty, is prepended to every metric name with a '.'
+// separator (e.g. Prefix="myapp" → "myapp.ingestor_flush_completed_total").
+// Rate controls the sample rate passed to DogStatsD; 0 defaults to 1.0
+// (every event reported).
 type DatadogAdapter struct {
 	Client DatadogClient
 	Prefix string

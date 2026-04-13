@@ -8,24 +8,30 @@ import (
 )
 
 // BatcherConfig controls when buffered records are flushed.
+//
+// A flush is triggered when any one of the enabled thresholds is reached:
+// accumulated byte size (always on), item count (when MaxItems > 0), or
+// elapsed time since the first item was added (FlushInterval).
 type BatcherConfig struct {
-	// MaxEstimatedInputBytes is the flush threshold based on the accumulated
-	// EstimatedSizeBytes of messages.
+	// MaxEstimatedInputBytes is the flush threshold in bytes based on the
+	// accumulated EstimatedSizeBytes of source messages. Required; must be > 0.
 	MaxEstimatedInputBytes int64
 
 	// MaxItems is an optional flush threshold based on the number of buffered
-	// records. Use 0 to disable.
+	// records. Set to 0 (default) to disable item-count flushing.
 	MaxItems int
 
-	// FlushInterval is the maximum amount of time records can remain buffered
-	// before a time-based flush happens.
+	// FlushInterval is the maximum time records can remain in the buffer before
+	// a time-based flush is triggered. Required; must be > 0.
 	FlushInterval time.Duration
 
-	// ReuseBuffers reuses backing arrays between flushes to reduce allocations.
+	// ReuseBuffers reuses internal backing arrays between flushes to reduce
+	// allocations and GC pressure. Recommended for high-throughput pipelines.
 	ReuseBuffers bool
 }
 
-// DefaultBatcherConfig matches the defaults used by common streaming services.
+// DefaultBatcherConfig provides a starting point suitable for most streaming
+// pipelines: 5 MiB batches, 5-minute flush interval, buffer reuse enabled.
 var DefaultBatcherConfig = BatcherConfig{
 	MaxEstimatedInputBytes: 5 * 1024 * 1024,
 	MaxItems:               0,
@@ -184,6 +190,32 @@ func (b *Batcher[iType]) updateTargetCap(bytes int64, n int) {
 	}
 
 	b.targetCap = ideal
+}
+
+// AddBatch appends all items produced from a single source message to the
+// active batch, recording the message's acknowledgement handle exactly once.
+//
+// Use this instead of calling Add repeatedly when a transformer expands one
+// envelope into multiple typed records. sizeBytes should reflect the total
+// estimated size of the originating message, not per-record.
+func (b *Batcher[iType]) AddBatch(now time.Time, items []iType, msg source.Message, sizeBytes int64) (flushNow bool) {
+	if !b.active {
+		b.active = true
+		b.deadline = now.Add(b.cfg.FlushInterval)
+	}
+
+	if sizeBytes < 0 {
+		sizeBytes = 0
+	}
+
+	b.items = append(b.items, items...)
+	b.bytes += sizeBytes
+	b.acks.Add(msg)
+
+	if b.cfg.MaxItems > 0 && len(b.items) >= b.cfg.MaxItems {
+		return true
+	}
+	return b.bytes >= b.cfg.MaxEstimatedInputBytes
 }
 
 func (b *Batcher[iType]) trimItemsIfNeeded() {

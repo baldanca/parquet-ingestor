@@ -41,8 +41,8 @@ func (s *runtimeSource) AckBatch(context.Context, []source.Message) error { retu
 
 type passthroughTransformer struct{}
 
-func (passthroughTransformer) Transform(_ context.Context, in source.Envelope) (map[string]any, error) {
-	return map[string]any{"value": in.Payload}, nil
+func (passthroughTransformer) Transform(_ context.Context, in source.Envelope) ([]map[string]any, error) {
+	return []map[string]any{{"value": in.Payload}}, nil
 }
 
 type bytesEncoder struct{}

@@ -20,20 +20,44 @@ import (
 	"github.com/baldanca/parquet-ingestor/transformer"
 )
 
-// KeyFunc builds the destination key for a flushed batch.
+// KeyFunc builds the destination key for a flushed batch. It is called once
+// per flush, synchronously, before encoding. The returned key is passed to
+// the Sink verbatim.
+//
+// An error from KeyFunc is treated as fatal: Run will stop and return the
+// error immediately, without acknowledging the batch.
 type KeyFunc[iType any] func(ctx context.Context, batch batcher.Batch[iType]) (key string, err error)
 
-// SinkPathResolver exposes a human-readable sink path for logs.
+// SinkPathResolver is an optional interface that sinks may implement to expose
+// a human-readable path (e.g. "s3://bucket/prefix/key") for structured log
+// output. When not implemented, the raw key is logged instead.
 type SinkPathResolver interface {
 	ResolvePath(key string) string
 }
 
-// Ingestor pulls messages from a Source, transforms them into typed records,
-// batches them, encodes the batch, writes it to a Sink, and acknowledges the
-// consumed messages.
+// Ingestor orchestrates a source → transform → batch → encode → sink pipeline.
 //
-// The ingest loop is single-threaded. Flush (encode/write/ack) can optionally
-// run concurrently via a worker pool configured in Run.
+// # Concurrency model
+//
+// The ingest loop (Run) is single-threaded: one message is received and
+// processed at a time. Flush operations (encode + write + ack) can run
+// concurrently when flushWorkers > 1, using an internal worker pool.
+//
+// Configuration methods (SetLogger, SetMetricsRegistry, EnableAdaptiveRuntime,
+// etc.) must be called before Run; they are not safe for concurrent use with
+// Run or with each other.
+//
+// # Error handling
+//
+// Runtime errors (encode failures, sink write failures, ack failures) are
+// non-fatal by default: they are logged and counted but do not stop the loop.
+// Only configuration errors returned by KeyFunc are fatal.
+//
+// # Acknowledgement guarantee
+//
+// Source messages are acknowledged only after a successful sink write. If the
+// sink write fails, the message will be re-delivered by the source according
+// to its own visibility or re-queue policy.
 type Ingestor[iType any] struct {
 	batcherConfig batcher.BatcherConfig
 	source        source.Sourcer
@@ -48,8 +72,6 @@ type Ingestor[iType any] struct {
 	batcher *batcher.Batcher[iType]
 
 	flushJobs    chan flushJob[iType]
-	flushErrCh   chan error
-	flushCancel  context.CancelFunc
 	flushBaseCtx context.Context
 	flushWorkers int
 	flushQueue   int
@@ -63,6 +85,9 @@ type Ingestor[iType any] struct {
 
 	inputLogSeq       atomic.Uint64
 	transformedLogSeq atomic.Uint64
+	payloadLogEvery   uint64
+
+	shutdownTimeout time.Duration
 
 	leaseEnabled              bool
 	leaseVisibilityTimeoutSec int32
@@ -97,7 +122,14 @@ func isFatalError(err error) bool {
 	return errors.As(err, &fe)
 }
 
-// NewIngestor builds an Ingestor.
+// NewIngestor constructs an Ingestor with a custom BatcherConfig.
+//
+// All parameters are required; NewIngestor returns an error if any is nil or
+// if batcherConfig is invalid (see BatcherConfig.validate).
+//
+// After construction, call the Set*/Enable* methods to configure logging,
+// metrics, retries, adaptive runtime, and leases, then call Run to start
+// processing.
 func NewIngestor[iType any](
 	batcherConfig batcher.BatcherConfig,
 	src source.Sourcer,
@@ -144,7 +176,8 @@ func NewIngestor[iType any](
 	}, nil
 }
 
-// NewDefaultIngestor builds an Ingestor using batcher.DefaultBatcherConfig.
+// NewDefaultIngestor constructs an Ingestor using batcher.DefaultBatcherConfig
+// (5 MiB batch size, 5-minute flush interval, buffer reuse enabled).
 func NewDefaultIngestor[iType any](
 	src source.Sourcer,
 	tr transformer.Transformer[iType],
@@ -155,7 +188,7 @@ func NewDefaultIngestor[iType any](
 	return NewIngestor(batcher.DefaultBatcherConfig, src, tr, enc, sk, keyFunc)
 }
 
-// SetLogger sets the logger used by the ingestor.
+// SetLogger sets the structured logger. Passing nil installs a no-op logger.
 func (i *Ingestor[iType]) SetLogger(l observability.Logger) {
 	if l == nil {
 		i.logger = observability.NopLogger()
@@ -164,7 +197,9 @@ func (i *Ingestor[iType]) SetLogger(l observability.Logger) {
 	i.logger = l
 }
 
-// SetMetricsRegistry sets the metrics registry used by the ingestor.
+// SetMetricsRegistry sets the metrics registry. Passing nil installs an empty
+// no-op registry. Use Registry.AddAdapter to forward metrics to Datadog or
+// other backends.
 func (i *Ingestor[iType]) SetMetricsRegistry(r *observability.Registry) {
 	if r == nil {
 		i.metrics = &observability.Registry{}
@@ -173,7 +208,13 @@ func (i *Ingestor[iType]) SetMetricsRegistry(r *observability.Registry) {
 	i.metrics = r
 }
 
-// EnableAdaptiveRuntime enables dynamic scaling of flush workers and source pollers.
+// EnableAdaptiveRuntime enables automatic scaling of flush workers and source
+// pollers based on CPU utilisation, memory pressure, and queue backlog.
+//
+// Zero-value fields in cfg are replaced with sensible defaults
+// (SampleInterval=2s, Cooldown=10s, TargetCPU=0.70, TargetMemory=0.80).
+// The source must implement source.PollerScaler for poller scaling to take
+// effect; flush worker scaling works for all sources.
 func (i *Ingestor[iType]) EnableAdaptiveRuntime(cfg AdaptiveRuntimeConfig) {
 	if cfg.SampleInterval <= 0 {
 		cfg.SampleInterval = 2 * time.Second
@@ -190,7 +231,9 @@ func (i *Ingestor[iType]) EnableAdaptiveRuntime(cfg AdaptiveRuntimeConfig) {
 	i.adaptive = &cfg
 }
 
-// SetRetryPolicy sets the retry policy for sink writes.
+// SetRetryPolicy sets the retry policy applied to sink write operations.
+// Passing nil disables retries (single attempt). Use SimpleRetry for
+// exponential backoff with optional jitter.
 func (i *Ingestor[iType]) SetRetryPolicy(p RetryPolicy) {
 	if p == nil {
 		i.retry = nopRetry{}
@@ -199,7 +242,9 @@ func (i *Ingestor[iType]) SetRetryPolicy(p RetryPolicy) {
 	i.retry = p
 }
 
-// SetAckRetryPolicy sets the retry policy for acknowledgements.
+// SetAckRetryPolicy sets the retry policy applied to source acknowledgements.
+// Passing nil disables retries. Ack failures are non-fatal but leave messages
+// eligible for re-delivery by the source.
 func (i *Ingestor[iType]) SetAckRetryPolicy(p RetryPolicy) {
 	if p == nil {
 		i.ackRetry = nopRetry{}
@@ -208,19 +253,33 @@ func (i *Ingestor[iType]) SetAckRetryPolicy(p RetryPolicy) {
 	i.ackRetry = p
 }
 
-// EnableLease enables periodic visibility extensions while a flush job is running.
+// EnableLease enables periodic visibility-timeout extensions for SQS messages
+// while a flush job is in progress. This prevents messages from becoming
+// visible again (and being re-delivered) during a long encode or upload.
 //
-// This requires the Source to also implement source.VisibilityExtender.
+// visibilityTimeoutSec is the new visibility timeout set on each renewal.
+// renewEvery controls how often the extension is sent; it must be shorter
+// than visibilityTimeoutSec to avoid gaps. A zero or negative renewEvery
+// defaults to 20 seconds.
+//
+// The Source must implement source.VisibilityExtender; if it does not,
+// EnableLease is silently ignored at runtime.
 func (i *Ingestor[iType]) EnableLease(visibilityTimeoutSec int32, renewEvery time.Duration) {
 	i.leaseEnabled = true
 	i.leaseVisibilityTimeoutSec = visibilityTimeoutSec
 	i.leaseRenewEvery = renewEvery
 }
 
-// Run starts the ingest loop.
+// Run starts the ingest loop and blocks until ctx is cancelled or a fatal
+// error occurs.
 //
-// If flushWorkers > 1, flush operations run concurrently via a worker pool.
-// flushQueue bounds the number of in-flight flushes.
+// flushWorkers controls how many encode/write/ack operations may run
+// concurrently (minimum 1). flushQueue is the depth of the internal job
+// channel; when full, the ingest loop blocks until a worker slot frees up.
+//
+// Run attempts a final flush of any buffered records on shutdown, waiting up
+// to the configured shutdown timeout (default 10 s; see SetShutdownTimeout).
+// It returns nil on clean shutdown and a non-nil error only when KeyFunc fails.
 func (i *Ingestor[iType]) Run(ctx context.Context, flushWorkers, flushQueue int) error {
 	if flushWorkers < 1 {
 		flushWorkers = 1
@@ -364,10 +423,7 @@ func (i *Ingestor[iType]) initFlushPoolLocked() {
 		i.flushBaseCtx = context.Background()
 	}
 	base := context.WithoutCancel(i.flushBaseCtx)
-	_, cancel := context.WithCancel(base)
-	i.flushCancel = cancel
 	i.flushJobs = make(chan flushJob[iType], i.flushQueue)
-	i.flushErrCh = make(chan error, 1)
 	current := len(i.flushStops)
 	for w := current; w < i.flushWorkers; w++ {
 		ctx, stop := context.WithCancel(base)
@@ -408,11 +464,25 @@ func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message
 		i.metrics.AddCounter("ingestor_input_payload_logs_total", 1)
 	}
 
-	out, err := i.transformer.Transform(ctx, env)
+	outs, err := i.transformer.Transform(ctx, env)
 	if err != nil {
 		i.metrics.AddCounter("ingestor_transform_errors_total", 1)
 		i.logger.Error("ingestor.transform.failed", "error", err)
 		_ = msg.Fail(ctx, err)
+		return false, nil
+	}
+
+	// An empty result means the transformer deliberately dropped the message
+	// (e.g. deduplication or filtering). Acknowledge it immediately so it is
+	// not re-delivered, and skip batching.
+	if len(outs) == 0 {
+		i.metrics.AddCounter("ingestor_messages_dropped_total", 1)
+		i.logger.Debug("ingestor.message.dropped", "reason", "transformer_returned_empty")
+		if ackErr := i.ackRetry.Do(ctx, func(ctx context.Context) error {
+			return i.source.AckBatch(ctx, []source.Message{msg})
+		}); ackErr != nil {
+			i.handleRuntimeError("ingestor.drop.ack_failed", ackErr)
+		}
 		return false, nil
 	}
 
@@ -430,12 +500,15 @@ func (i *Ingestor[iType]) processMessage(ctx context.Context, msg source.Message
 
 	now := time.Now()
 	if i.shouldLogPayload(false) {
-		i.logger.Debug("ingestor.message.transformed", "payload", i.logValue(out))
-		i.metrics.AddCounter("ingestor_transformed_payload_logs_total", 1)
+		for _, out := range outs {
+			i.logger.Debug("ingestor.message.transformed", "payload", i.logValue(out))
+		}
+		i.metrics.AddCounter("ingestor_transformed_payload_logs_total", int64(len(outs)))
 	}
 
-	flushNow = i.batcher.Add(now, out, msg, sizeBytes)
+	flushNow = i.batcher.AddBatch(now, outs, msg, sizeBytes)
 	i.metrics.AddCounter("ingestor_messages_buffered_total", 1)
+	i.metrics.AddCounter("ingestor_records_buffered_total", int64(len(outs)))
 	return flushNow, nil
 }
 
@@ -458,6 +531,9 @@ func (i *Ingestor[iType]) flush(ctx context.Context) error {
 
 		job := flushJob[iType]{key: key, items: items, acks: acks}
 
+		if len(i.flushJobs) == cap(i.flushJobs) {
+			i.metrics.AddCounter("ingestor_flush_queue_backpressure_total", 1)
+		}
 		select {
 		case i.flushJobs <- job:
 			return nil
@@ -480,6 +556,8 @@ func (i *Ingestor[iType]) flushJob(ctx context.Context, job flushJob[iType]) err
 		defer stopLease()
 	}
 
+	start := time.Now()
+
 	if streamed, err := tryStreamWrite(ctx, i.encoder, i.sink, i.retry, job.key, job.items); streamed {
 		if err != nil {
 			i.metrics.AddCounter("ingestor_flush_errors_total", 1)
@@ -495,6 +573,7 @@ func (i *Ingestor[iType]) flushJob(ctx context.Context, job flushJob[iType]) err
 		}
 		i.metrics.AddCounter("ingestor_flush_completed_total", 1)
 		i.metrics.AddCounter("ingestor_acked_total", int64(len(job.items)))
+		i.metrics.SetGauge("ingestor_last_flush_duration_ms", time.Since(start).Milliseconds())
 		i.logSinkWrite(job.key, len(job.items), -1)
 		return nil
 	}
@@ -530,6 +609,7 @@ func (i *Ingestor[iType]) flushJob(ctx context.Context, job flushJob[iType]) err
 	i.metrics.AddCounter("ingestor_flush_completed_total", 1)
 	i.metrics.AddCounter("ingestor_acked_total", int64(len(job.items)))
 	i.metrics.AddCounter("ingestor_sink_writes_total", 1)
+	i.metrics.SetGauge("ingestor_last_flush_duration_ms", time.Since(start).Milliseconds())
 	i.logSinkWrite(job.key, len(job.items), len(data))
 	return nil
 }
@@ -556,7 +636,7 @@ func (i *Ingestor[iType]) startJobLease(parent context.Context, ext source.Visib
 				return
 			case <-t.C:
 				if err := ext.ExtendVisibilityBatch(ctx, metas, i.leaseVisibilityTimeoutSec); err != nil {
-					i.handleRuntimeError("ingestor.lease.extend_failed", err)
+					i.handleRuntimeError("ingestor.lease.extend_failed", err, "message_count", len(metas))
 					return
 				}
 			}
@@ -567,8 +647,12 @@ func (i *Ingestor[iType]) startJobLease(parent context.Context, ext source.Visib
 }
 
 func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
+	timeout := i.shutdownTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
 	base := context.WithoutCancel(ctx)
-	stopCtx, cancel := context.WithTimeout(base, 10*time.Second)
+	stopCtx, cancel := context.WithTimeout(base, timeout)
 	defer cancel()
 
 	if err := i.flush(stopCtx); err != nil {
@@ -599,18 +683,38 @@ func (i *Ingestor[iType]) flushRemainingOnStop(ctx context.Context) error {
 		for _, stop := range i.flushStops {
 			stop()
 		}
-		i.logger.Warn("ingestor.run.stop_timeout", "error", stopCtx.Err())
+		i.metrics.AddCounter("ingestor_shutdown_timeout_total", 1)
+		i.logger.Warn("ingestor.run.stop_timeout", "error", stopCtx.Err(), "timeout", timeout)
 		return nil
 	}
 }
 
-func (i *Ingestor[iType]) shouldLogPayload(input bool) bool {
-	if input {
-		i.inputLogSeq.Add(1)
-		return true
+// SetPayloadLogEvery enables debug-level payload logging every n messages.
+// A value of 0 (default) disables payload logging entirely, which is the
+// recommended setting for production to avoid logging sensitive data.
+func (i *Ingestor[iType]) SetPayloadLogEvery(n uint64) {
+	i.payloadLogEvery = n
+}
+
+// SetShutdownTimeout overrides the maximum time the ingestor will wait for
+// in-flight flush workers to finish on graceful shutdown. Defaults to 10s.
+func (i *Ingestor[iType]) SetShutdownTimeout(d time.Duration) {
+	if d > 0 {
+		i.shutdownTimeout = d
 	}
-	i.transformedLogSeq.Add(1)
-	return true
+}
+
+func (i *Ingestor[iType]) shouldLogPayload(input bool) bool {
+	if i.payloadLogEvery == 0 {
+		return false
+	}
+	var seq uint64
+	if input {
+		seq = i.inputLogSeq.Add(1)
+	} else {
+		seq = i.transformedLogSeq.Add(1)
+	}
+	return seq%i.payloadLogEvery == 0
 }
 
 func (i *Ingestor[iType]) handleRuntimeError(event string, err error, args ...any) {
@@ -618,7 +722,15 @@ func (i *Ingestor[iType]) handleRuntimeError(event string, err error, args ...an
 		return
 	}
 	i.metrics.AddCounter("ingestor_runtime_errors_total", 1)
-	attrs := append([]any{"error", err}, args...)
+	// Fast path: avoid a heap allocation when no extra key-value pairs are
+	// provided, which is the case for most call sites.
+	if len(args) == 0 {
+		i.logger.Error(event, "error", err)
+		return
+	}
+	attrs := make([]any, 0, 2+len(args))
+	attrs = append(attrs, "error", err)
+	attrs = append(attrs, args...)
 	i.logger.Error(event, attrs...)
 }
 
@@ -649,8 +761,15 @@ func (i *Ingestor[iType]) logSinkWrite(key string, items int, bytes int) {
 	)
 }
 
-// DefaultKeyFunc builds time-partitioned keys and appends a random suffix to
-// avoid collisions.
+// DefaultKeyFunc returns a KeyFunc that generates time-partitioned, collision-
+// safe object keys using the encoder's file extension.
+//
+// Keys follow the format:
+//
+//	YYYY/MM/DD/HH/<UnixNano>-<8-byte random hex><.ext>
+//
+// The timestamp is always UTC. The random suffix prevents collisions when
+// multiple ingestor instances flush at the same nanosecond.
 func DefaultKeyFunc[iType any](enc encoder.Encoder[iType]) KeyFunc[iType] {
 	ext := enc.FileExtension()
 	if ext == "" || ext[0] != '.' {
@@ -671,12 +790,20 @@ func DefaultKeyFunc[iType any](enc encoder.Encoder[iType]) KeyFunc[iType] {
 	}
 }
 
+// countingWriter counts bytes written to it without allocating storage.
+type countingWriter struct{ n int64 }
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	return len(p), nil
+}
+
 func estimateSizeBytesFallback(v any) (int64, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
+	var cw countingWriter
+	if err := json.NewEncoder(&cw).Encode(v); err != nil {
 		return 0, err
 	}
-	return int64(len(b)), nil
+	return cw.n, nil
 }
 
 func randomHex(nBytes int) (string, error) {

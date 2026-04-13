@@ -5,34 +5,42 @@ import "context"
 // Envelope is the raw payload received from a Source.
 //
 // The ingestor does not impose any schema on Envelope; it is the transformer's
-// responsibility to validate and convert it into a typed record.
+// responsibility to validate and convert it into typed records.
 type Envelope struct {
 	Payload any
 }
 
 // Message represents one unit received from a Source.
 //
-// Implementations may optionally expose an estimated size to help the batcher
-// flush earlier without counting exact bytes.
+// EstimatedSizeBytes is used by the Batcher to decide when to flush; sources
+// that can provide this cheaply (e.g. SQS body length) should implement it.
+// When ok is false, the ingestor falls back to JSON-encoding the payload to
+// estimate the size.
+//
+// Fail is called when the transformer returns an error or when size estimation
+// fails. Source implementations may use it to extend the visibility timeout so
+// the message is retried after a delay rather than immediately.
 type Message interface {
 	Data() Envelope
 	EstimatedSizeBytes() (n int64, ok bool)
 	Fail(ctx context.Context, reason error) error
 }
 
-// Sourcer reads messages and acknowledges them in batches.
+// Sourcer reads messages from a queue or stream and acknowledges processed
+// batches. Receive must block until a message is available or ctx is cancelled.
 //
-// Sources should ensure that Receive blocks until a message is available or the
-// context is canceled.
+// AckBatch is called after a successful sink write to confirm that the batch
+// of messages was durably stored and can be removed from the source.
 type Sourcer interface {
 	Receive(ctx context.Context) (Message, error)
 	AckBatch(ctx context.Context, msgs []Message) error
 }
 
-// VisibilityExtender can extend the visibility timeout for a batch of messages.
-//
-// This is primarily useful for SQS-style leases when flushing and uploading
-// takes longer than the queue visibility timeout.
+// VisibilityExtender is an optional interface for sources that support
+// per-message visibility leases (e.g. SQS). When a source implements this
+// interface and the ingestor has a lease enabled (via EnableLease), the
+// ingestor will periodically call ExtendVisibilityBatch during long flushes
+// to prevent messages from becoming visible and being re-delivered.
 type VisibilityExtender interface {
 	ExtendVisibilityBatch(ctx context.Context, metas []AckMetadata, timeoutSeconds int32) error
 }
@@ -52,10 +60,15 @@ type ackMetaBatcher interface {
 	AckBatchMeta(ctx context.Context, metas []AckMetadata) error
 }
 
-// AckGroup accumulates messages that should be acknowledged together.
+// AckGroup accumulates messages that should be acknowledged together after a
+// successful sink write.
 //
-// If the Source supports fast acknowledgements via AckBatchMeta, the AckGroup
-// will prefer it when all messages provide AckMetadata.
+// If the Source supports the optional ackMetaBatcher interface (fast-path via
+// AckBatchMeta), AckGroup will use it when all messages provided AckMetadata;
+// otherwise it falls back to AckBatch.
+//
+// AckGroup is not safe for concurrent use. It is owned by the Batcher and
+// handed off to a flush job; callers must not share it across goroutines.
 type AckGroup struct {
 	msgs  []Message
 	metas []AckMetadata
@@ -135,13 +148,19 @@ func (g *AckGroup) Metas() []AckMetadata {
 	return g.metas
 }
 
-// PollerScaler allows sources with internal pollers to be resized at runtime.
+// PollerScaler is an optional interface for sources that maintain an internal
+// pool of polling goroutines. When a source implements PollerScaler, the
+// adaptive runtime (EnableAdaptiveRuntime) can scale pollers up or down based
+// on buffer pressure and available CPU/memory headroom.
 type PollerScaler interface {
 	SetPollers(n int)
 	Pollers() int
 }
 
-// BufferStats exposes source buffering pressure to adaptive runtimes.
+// BufferStats is an optional interface for sources that buffer messages
+// internally before they are delivered to Receive. The adaptive runtime uses
+// BufferUsage to detect when the source-side buffer is filling up (scale up
+// pollers) or draining (scale down or hold steady).
 type BufferStats interface {
 	BufferUsage() (used, capacity int)
 }

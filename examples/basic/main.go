@@ -48,16 +48,16 @@ func (s *memSource) AckBatch(ctx context.Context, msgs []source.Message) error {
 
 type jsonTransformer struct{}
 
-func (jsonTransformer) Transform(ctx context.Context, env source.Envelope) (item, error) {
+func (jsonTransformer) Transform(ctx context.Context, env source.Envelope) ([]item, error) {
 	var out item
 	b, ok := env.Payload.([]byte)
 	if !ok {
-		return out, fmt.Errorf("payload is not []byte")
+		return nil, fmt.Errorf("payload is not []byte")
 	}
 	if err := json.Unmarshal(b, &out); err != nil {
-		return out, err
+		return nil, err
 	}
-	return out, nil
+	return []item{out}, nil
 }
 
 type memSink struct {

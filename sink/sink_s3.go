@@ -29,9 +29,12 @@ type S3Sink struct {
 // Sink is kept for backward compatibility.
 type Sink = S3Sink
 
-// NewSinkS3 creates an S3 sink that uploads to the given bucket and optional prefix.
+// NewSinkS3 creates an S3 sink that uploads objects to bucket, optionally
+// under prefix. The prefix is trimmed of leading/trailing slashes and joined
+// with the object key with a single '/' separator.
 //
-// Prefix is joined with the request key using a single '/' separator.
+// NewSinkS3 panics on nil client or blank bucket because those are
+// configuration errors that should be caught at startup, not at write time.
 func NewSinkS3(client transfermanager.S3APIClient, bucket, prefix string) *S3Sink {
 	if client == nil {
 		panic("s3 client is required")

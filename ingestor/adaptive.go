@@ -9,6 +9,13 @@ import (
 	"github.com/baldanca/parquet-ingestor/source"
 )
 
+// runtimeMetricNames holds the metric names read in every adaptive sample.
+// Declared as a package-level var so the slice is allocated once at init time.
+var runtimeMetricNames = [2]string{
+	"/memory/classes/heap/objects:bytes", // live heap bytes — equivalent to MemStats.Alloc, no STW
+	"/cpu/classes/total:cpu-seconds",     // cumulative CPU time across all goroutines
+}
+
 // AdaptiveRuntimeConfig enables dynamic scaling based on memory, CPU, and backlog.
 type AdaptiveRuntimeConfig struct {
 	Enabled                 bool
@@ -50,9 +57,9 @@ func (i *Ingestor[iType]) startAdaptiveLoop(ctx context.Context) {
 				return
 			case <-ticker.C:
 				now := time.Now()
-				snap := i.snapshotRuntime(now, prevTS, prevCPUTime)
+				snap, cpuNow := i.snapshotRuntime(now, prevTS, prevCPUTime)
 				prevTS = now
-				prevCPUTime = readCPUTimeSeconds()
+				prevCPUTime = cpuNow
 				i.publishRuntimeMetrics(snap)
 				if !lastScale.IsZero() && now.Sub(lastScale) < i.adaptive.Cooldown {
 					continue
@@ -65,11 +72,19 @@ func (i *Ingestor[iType]) startAdaptiveLoop(ctx context.Context) {
 	}()
 }
 
-func (i *Ingestor[iType]) snapshotRuntime(now, prevTS time.Time, prevCPUTime float64) runtimeSnapshot {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	used := ms.Alloc
-	cpuNow := readCPUTimeSeconds()
+// snapshotRuntime reads both memory and CPU metrics in a single
+// runtimemetrics.Read call (no stop-the-world) and returns the snapshot along
+// with the raw CPU time reading so the caller can use it as the baseline for
+// the next interval, avoiding a redundant second read.
+func (i *Ingestor[iType]) snapshotRuntime(now, prevTS time.Time, prevCPUTime float64) (runtimeSnapshot, float64) {
+	var samples [2]runtimemetrics.Sample
+	samples[0].Name = runtimeMetricNames[0]
+	samples[1].Name = runtimeMetricNames[1]
+	runtimemetrics.Read(samples[:])
+
+	used := samples[0].Value.Uint64()
+	cpuNow := samples[1].Value.Float64()
+
 	elapsed := now.Sub(prevTS).Seconds()
 	cpuUtil := 0.0
 	if elapsed > 0 {
@@ -89,7 +104,7 @@ func (i *Ingestor[iType]) snapshotRuntime(now, prevTS time.Time, prevCPUTime flo
 	if ps, ok := i.source.(source.PollerScaler); ok {
 		snap.pollers = ps.Pollers()
 	}
-	return snap
+	return snap, cpuNow
 }
 
 func (i *Ingestor[iType]) publishRuntimeMetrics(s runtimeSnapshot) {
@@ -253,11 +268,4 @@ func readCPUTimeSeconds() float64 {
 	samples[0].Name = "/cpu/classes/total:cpu-seconds"
 	runtimemetrics.Read(samples[:])
 	return samples[0].Value.Float64()
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

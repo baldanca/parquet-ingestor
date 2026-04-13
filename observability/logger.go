@@ -3,6 +3,11 @@ package observability
 import "log/slog"
 
 // Logger is a minimal structured logger interface used across the project.
+// args must be alternating key-value pairs (compatible with slog and zap).
+//
+// The recommended implementation is NewSlogLogger, which wraps the standard
+// library slog.Logger. Custom implementations are straightforward to write
+// for zerolog, zap, or any other structured logging library.
 type Logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
