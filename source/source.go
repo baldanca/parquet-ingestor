@@ -6,8 +6,15 @@ import "context"
 //
 // The ingestor does not impose any schema on Envelope; it is the transformer's
 // responsibility to validate and convert it into typed records.
+//
+// Attributes carries source-specific message metadata. For SQS sources with
+// IncludeAttributes enabled, the map contains system attributes (e.g.
+// "ApproximateReceiveCount", "SentTimestamp"), user MessageAttributes (String
+// and Number data types), and the message ID under the key "MessageId".
+// Attributes is nil when no metadata is available.
 type Envelope struct {
-	Payload any
+	Payload    any
+	Attributes map[string]string
 }
 
 // Message represents one unit received from a Source.

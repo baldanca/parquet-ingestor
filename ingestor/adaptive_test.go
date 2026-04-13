@@ -97,7 +97,9 @@ func TestIngestor_AdaptiveDecision_ScalesUpWorkersAndPollersWhenSourceIsUnderPre
 	close(ing.flushJobs)
 }
 
-func TestIngestor_AdaptiveDecision_DoesNotScaleUpPollersWhenIdle(t *testing.T) {
+func TestIngestor_AdaptiveDecision_IdleScalesWorkersDown(t *testing.T) {
+	// When workers are above minimum and the flush queue is idle, the adaptive
+	// runtime should scale workers back down (not scale pollers up).
 	src := &adaptiveSource{tSource: newTSource(), pollers: 1, used: 0, cap: 10}
 	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
 	sk := &tSink{}
@@ -122,11 +124,49 @@ func TestIngestor_AdaptiveDecision_DoesNotScaleUpPollersWhenIdle(t *testing.T) {
 		}
 	}()
 
-	if ing.applyAdaptiveDecision(runtimeSnapshot{memBytes: 100, cpuUtil: 0.2, flushQueueLen: 0, flushQueueCap: 4, sourceUsed: 0, sourceCap: 10, workers: 2, pollers: 1}) {
-		t.Fatalf("expected no scale up while idle")
+	// workers=2 > minWorkers=1, flushUsage=0 < 0.20 → should scale workers down
+	if !ing.applyAdaptiveDecision(runtimeSnapshot{memBytes: 100, cpuUtil: 0.2, flushQueueLen: 0, flushQueueCap: 4, sourceUsed: 0, sourceCap: 10, workers: 2, pollers: 1}) {
+		t.Fatal("expected idle scale-down of workers")
 	}
+	if got := ing.currentFlushWorkers(); got != 1 {
+		t.Fatalf("workers=%d want=1", got)
+	}
+	// pollers must NOT have been scaled up
 	if src.pollers != 1 {
-		t.Fatalf("pollers=%d want=1", src.pollers)
+		t.Fatalf("pollers=%d want=1 (must not scale up while idle)", src.pollers)
+	}
+}
+
+func TestIngestor_AdaptiveDecision_AtMinimumNoIdleScaleDown(t *testing.T) {
+	// When already at minimum workers and pollers, idle state should not trigger
+	// any scaling action.
+	src := &adaptiveSource{tSource: newTSource(), pollers: 1, used: 0, cap: 10}
+	enc := &tEncoder{ct: "application/octet-stream", ext: ".bin"}
+	sk := &tSink{}
+	cfg := batcher.DefaultBatcherConfig
+	cfg.FlushInterval = time.Second
+	cfg.MaxEstimatedInputBytes = 1024
+	ing, err := NewIngestor(cfg, src, tTransformer{}, enc, sk, func(ctx context.Context, b batcher.Batch[int]) (string, error) { return "k", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ing.SetMetricsRegistry(&observability.Registry{})
+	ing.EnableAdaptiveRuntime(AdaptiveRuntimeConfig{Enabled: true, MinWorkers: 1, MaxWorkers: 4, MinPollers: 1, MaxPollers: 3, TargetCPUUtilization: 0.8, TargetMemoryUtilization: 0.8, MaxMemoryBytes: 1024 * 1024, SampleInterval: time.Second, Cooldown: time.Second})
+	ing.flushQueue = 4
+	ing.flushWorkers = 1
+	ing.maybeStartFlushPool(context.Background())
+	defer func() {
+		for _, stop := range ing.flushStops {
+			stop()
+		}
+		if ing.flushJobs != nil {
+			close(ing.flushJobs)
+		}
+	}()
+
+	// workers=1==minWorkers, pollers=1==minPollers → no scaling should occur
+	if ing.applyAdaptiveDecision(runtimeSnapshot{memBytes: 100, cpuUtil: 0.2, flushQueueLen: 0, flushQueueCap: 4, sourceUsed: 0, sourceCap: 10, workers: 1, pollers: 1}) {
+		t.Fatal("expected no action when already at minimum workers and pollers")
 	}
 }
 
