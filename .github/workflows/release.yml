@@ -74,7 +74,7 @@ jobs:
 
       - name: Create or update GitHub release
         if: steps.v.outputs.skip == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.v.outputs.tag }}
           target_commitish: ${{ steps.v.outputs.sha }}
